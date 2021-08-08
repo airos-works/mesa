@@ -57,6 +57,10 @@
 #include "eglimage.h"
 #include "eglsync.h"
 
+#ifdef __HAIKU__
+#define static_assert _Static_assert
+#endif
+
 /* Includes for _eglNativePlatformDetectNativeDisplay */
 #ifdef HAVE_WAYLAND_PLATFORM
 #include <wayland-client.h>

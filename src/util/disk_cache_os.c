@@ -164,10 +164,19 @@ choose_lru_file_matching(const char *dir_path,
    if (dir == NULL)
       return NULL;
 
+#ifdef __HAIKU__
+   struct stat info;
+#endif
+
    /* First count the number of files in the directory */
    unsigned total_file_count = 0;
    while ((dir_ent = readdir(dir)) != NULL) {
+#ifdef __HAIKU__
+   stat(dir_ent->d_name, &info);
+   if (S_ISREG(info.st_mode)) {
+#else
       if (dir_ent->d_type == DT_REG) { /* If the entry is a regular file */
+#endif
          total_file_count++;
       }
    }

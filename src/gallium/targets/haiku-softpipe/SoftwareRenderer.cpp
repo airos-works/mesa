@@ -14,6 +14,7 @@
 
 #include <Autolock.h>
 #include <interface/DirectWindowPrivate.h>
+#include <interface/ColorConversion.h>
 #include <GraphicsDefs.h>
 #include <Screen.h>
 #include <stdio.h>
@@ -40,44 +41,50 @@ instantiate_gl_renderer(BGLView *view, ulong opts)
 	return new SoftwareRenderer(view, opts);
 }
 
-struct RasBuf32
+struct RasBuffer
 {
 	int32 width, height, stride;
 	int32 orgX, orgY;
-	int32 *colors;
+	void *colors;
+	color_space pixel_format;
+	int32 pixel_size;	
 
-	RasBuf32(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, int32 *colors):
+	RasBuffer(int32 width, int32 height, int32 stride, int32 orgX, int32 orgY, void *colors):
 		width(width), height(height), stride(stride), orgX(orgX), orgY(orgY), colors(colors)
 	{}
 
-	RasBuf32(BBitmap *bmp)
+	RasBuffer(BBitmap *bmp)
 	{
 		width  = bmp->Bounds().IntegerWidth()  + 1;
 		height = bmp->Bounds().IntegerHeight() + 1;
-		stride = bmp->BytesPerRow()/4;
+		stride = bmp->BytesPerRow();
 		orgX   = 0;
 		orgY   = 0;
-		colors = (int32*)bmp->Bits();
+		pixel_format = bmp->ColorSpace();
+		pixel_size = stride / width;
+		colors = bmp->Bits();
 	}
 
-	RasBuf32(direct_buffer_info *info)
+	RasBuffer(direct_buffer_info *info)
 	{
 		width  = 0x7fffffff;
 		height = 0x7fffffff;
-		stride = info->bytes_per_row/4;
+		stride = info->bytes_per_row;
 		orgX   = 0;
 		orgY   = 0;
-		colors = (int32*)info->bits;
+		pixel_format = info->pixel_format;
+		pixel_size = info->bits_per_pixel / 8;
+		colors = info->bits;
 	}
 
 	void ClipSize(int32 x, int32 y, int32 w, int32 h)
 	{
 		if (x < 0) {w += x; x = 0;}
 		if (y < 0) {h += y; y = 0;}
-		if (x + w >  width) {w = width  - x;}
+		if (x + w > width) {w = width  - x;}
 		if (y + h > height) {h = height - y;}
 		if ((w > 0) && (h > 0)) {
-			colors += y*stride + x;
+			colors += (y * stride) + (x * pixel_size);
 			width  = w;
 			height = h;
 		} else {
@@ -98,27 +105,21 @@ struct RasBuf32
 		orgY += dy;
 	}
 
-	void Clear(int32 color)
+	void Blit(RasBuffer src)
 	{
-		RasBuf32 dst = *this;
-		dst.stride -= dst.width;
-		for (; dst.height > 0; dst.height--) {
-			for (int32 i = dst.width; i > 0; i--)
-				*dst.colors++ = color;
-			dst.colors += dst.stride;
-		}
-	}
-
-	void Blit(RasBuf32 src)
-	{
-		RasBuf32 dst = *this;
+		RasBuffer dst = *this;
 		int32 x, y;
 		x = src.orgX - orgX;
 		y = src.orgY - orgY;
 		dst.ClipSize(x, y, src.width, src.height);
 		src.ClipSize(-x, -y, width, height);
 		for (; dst.height > 0; dst.height--) {
-			memcpy(dst.colors, src.colors, 4*dst.width);
+			if (src.pixel_format == dst.pixel_format) {
+				memcpy(dst.colors, src.colors, src.width * src.pixel_size);
+			} else {
+				BPrivate::ConvertBits(src.colors, dst.colors, src.stride, dst.stride,
+					src.stride, dst.stride, src.pixel_format, dst.pixel_format, src.width, 1);
+			}
 			dst.colors += dst.stride;
 			src.colors += src.stride;
 		}
@@ -228,11 +229,11 @@ SoftwareRenderer::Display(BBitmap *bitmap, BRect *updateRect)
 	} else {
 		BAutolock lock(fInfoLocker);
 		if (fInfo != NULL) {
-			RasBuf32 srcBuf(bitmap);
-			RasBuf32 dstBuf(fInfo);
+			RasBuffer srcBuf(bitmap);
+			RasBuffer dstBuf(fInfo);
 			for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
 				clipping_rect *clip = &fInfo->clip_list[i];
-				RasBuf32 dstClip = dstBuf;
+				RasBuffer dstClip = dstBuf;
 				dstClip.ClipRect(clip->left, clip->top, clip->right + 1, clip->bottom + 1);
 				dstClip.Shift(-fInfo->window_bounds.left, -fInfo->window_bounds.top);
 				dstClip.Blit(srcBuf);

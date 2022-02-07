@@ -25,6 +25,9 @@ if with_platform_windows
   module_dir = join_paths(get_option('prefix'), get_option('bindir'))
   icd_file_name = 'vulkan_lvp.dll'
 endif
+if with_platform_haiku
+  module_dir = './'
+endif
 
 lvp_icd = custom_target(
   'lvp_icd',

@@ -207,6 +207,10 @@ extern "C"
 EGLBoolean
 init_haiku(_EGLDisplay *disp)
 {
+#if 1
+	// Does not work.
+	return EGL_FALSE;
+#else
 	_EGLDevice *dev;
 	CALLED();
 
@@ -224,6 +228,7 @@ init_haiku(_EGLDisplay *disp)
 	TRACE("Initialization finished\n");
 
 	return EGL_TRUE;
+#endif
 }
 
 

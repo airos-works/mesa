@@ -1,9 +1,9 @@
 /**************************************************************************
- * 
+ *
  * Copyright 1999-2006 Brian Paul
  * Copyright 2008 VMware, Inc.
  * All Rights Reserved.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
  * to deal in the Software without restriction, including without limitation
@@ -279,7 +279,7 @@ static inline bool u_thread_is_self(thrd_t thread)
  * util_barrier
  */
 
-#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__)
+#if defined(HAVE_PTHREAD) && !defined(__APPLE__)
 
 typedef pthread_barrier_t util_barrier;
 

@@ -58,6 +58,10 @@ private:
 			bool				fPresentedIntoScanout;
 			// whether ScanoutTarget took fInfoLocker and still holds it
 			bool				fScanoutTargetHeld;
+			// how many frames went into the screen since the window system
+			// last said anything, reported under ZINK_SCANOUT_TRACE. It is
+			// what shows whether a frame can be drawn at a place the window
+			// has already left.
 			int32				fPresentCount = 0;
 			// when the window last moved or its clipping changed
 			bigtime_t			fLastPlacementChange = 0;

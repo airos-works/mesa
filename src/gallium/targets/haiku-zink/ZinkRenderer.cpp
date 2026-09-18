@@ -236,6 +236,7 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 
 	target->origin_x = fInfo->window_bounds.left;
 	target->origin_y = fInfo->window_bounds.top;
+	target->bits = fInfo->bits;
 	target->bytes_per_row = fInfo->bytes_per_row;
 	target->num_clips = fInfo->clip_list_count;
 	for (uint32 i = 0; i < fInfo->clip_list_count; i++) {

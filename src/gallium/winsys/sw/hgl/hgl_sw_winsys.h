@@ -41,7 +41,10 @@
 struct hgl_scanout_target {
 	int32_t origin_x;
 	int32_t origin_y;
-	uint32_t bytes_per_row;		// of the screen, to check it is the one we hold
+	// The frame buffer the window system is showing. A mode set makes a new
+	// one, and its address is how a renderer holding the old one finds out.
+	void *bits;
+	uint32_t bytes_per_row;
 	uint32_t num_clips;
 	struct {
 		// screen coordinates, the right and bottom edges included

@@ -1502,10 +1502,14 @@ present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
 // and shares. It is video memory, so a frame copied there does not cross the
 // bus at all - a 1920x1080 frame costs about a millisecond instead of three.
 static bool
-acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
+acquire_scanout(struct zink_screen *screen,
+                const struct hgl_scanout_target *target)
 {
+   const uint32_t bytes_per_row = target->bytes_per_row;
+
    if (screen->scanout.buffer != VK_NULL_HANDLE) {
-      if (screen->scanout.row_pitch == bytes_per_row)
+      if (screen->scanout.bits == target->bits &&
+          screen->scanout.row_pitch == bytes_per_row)
          return true;
 
       /* The mode changed under us; the frame buffer we hold is the old one.
@@ -1519,6 +1523,7 @@ acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
       screen->scanout.height = 0;
       screen->scanout.row_pitch = 0;
       screen->scanout.size = 0;
+      screen->scanout.bits = NULL;
       screen->scanout.tried = false;
    }
    if (screen->scanout.tried)
@@ -1584,6 +1589,7 @@ acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
    screen->scanout.height = scanout.height;
    screen->scanout.row_pitch = scanout.rowPitch;
    screen->scanout.size = scanout.size;
+   screen->scanout.bits = target->bits;
    screen->scanout.tried = false;
    return true;
 }
@@ -1659,7 +1665,7 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
    if (blocksize != 4)
       return false;
 
-   if (!acquire_scanout(screen, target->bytes_per_row))
+   if (!acquire_scanout(screen, target))
       return false;
 
    VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
@@ -1722,6 +1728,7 @@ zink_represent_into_scanout(struct pipe_screen *pscreen,
    const bool trace = getenv("ZINK_SCANOUT_TRACE") != NULL;
 
    if (screen->scanout.buffer == VK_NULL_HANDLE ||
+       screen->scanout.bits != target.bits ||
        screen->scanout.row_pitch != target.bytes_per_row)
       RETURN_WHY("no scanout held");
 

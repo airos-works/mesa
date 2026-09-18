@@ -200,6 +200,7 @@ struct zink_screen {
       uint32_t height;
       uint32_t row_pitch;
       uint64_t size;
+      void *bits;       /* what the window system calls it, to spot a new one */
       bool tried;       /* asked for once; do not ask again if refused */
 
       /* For putting the last frame back when a window that has stopped

@@ -46,7 +46,8 @@
 #include "util/os_file.h"
 #include "frontend/sw_winsys.h"
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+/* Haiku has no DRM, and so no dma-buf sharing. */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__HAIKU__)
 #define ZINK_USE_DMABUF
 #endif
 
@@ -708,7 +709,11 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
 
       VkResult result = VKSCR(CreateImage)(screen->dev, &ici, NULL, &obj->image);
       if (result != VK_SUCCESS) {
-         debug_printf("vkCreateImage failed\n");
+         fprintf(stderr, "zink: vkCreateImage failed (%d): format %d type %d "
+                 "%ux%ux%u mips %u layers %u samples %u tiling %d usage %#x flags %#x\n",
+                 result, ici.format, ici.imageType, ici.extent.width, ici.extent.height,
+                 ici.extent.depth, ici.mipLevels, ici.arrayLayers, ici.samples,
+                 ici.tiling, ici.usage, ici.flags);
          goto fail1;
       }
 

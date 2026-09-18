@@ -130,10 +130,15 @@ hgl_winsys_displaytarget_create(struct sw_winsys* winsys,
 
 	if (textureUsage & PIPE_BIND_DISPLAY_TARGET) {
 		haikuDisplayTarget->data = NULL;
+		// Ask for the rows to be as long as the stride we report, so that a
+		// driver copying into the mapped bitmap with that stride stays inside
+		// it, and then report what the bitmap actually settled on.
 		haikuDisplayTarget->bitmap = new BBitmap(
-			BRect(0, 0, width - 1, height - 1),
+			BRect(0, 0, width - 1, height - 1), 0,
 			haikuDisplayTarget->colorSpace,
 			haikuDisplayTarget->stride);
+		haikuDisplayTarget->stride = haikuDisplayTarget->bitmap->BytesPerRow();
+		haikuDisplayTarget->size = haikuDisplayTarget->stride * blockSize;
 	} else {
 		haikuDisplayTarget->data
 			= align_malloc(haikuDisplayTarget->size, alignment);

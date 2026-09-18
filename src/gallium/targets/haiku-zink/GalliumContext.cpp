@@ -12,7 +12,9 @@
 
 #include <stdlib.h>
 
+extern "C" {
 #include "zink/zink_public.h"
+}
 
 #include <stdio.h>
 #include <algorithm>
@@ -356,7 +358,8 @@ GalliumContext::SwapBuffers(context_id contextID)
 
 	// flush back buffer and swap buffers if double buffering is used
 	if (buffer->textures[ST_ATTACHMENT_BACK_LEFT] != NULL) {
-		buffer->screen->flush_frontbuffer(buffer->screen, NULL, buffer->textures[ST_ATTACHMENT_BACK_LEFT],
+		buffer->screen->flush_frontbuffer(buffer->screen, context->st->pipe,
+			buffer->textures[ST_ATTACHMENT_BACK_LEFT],
 			0, 0, buffer->winsysContext, NULL);
 		std::swap(buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->textures[ST_ATTACHMENT_BACK_LEFT]);
 		p_atomic_inc(&buffer->stfbi->stamp);
@@ -382,7 +385,10 @@ GalliumContext::Draw(context_id contextID, BRect updateRect)
 	if (buffer->textures[ST_ATTACHMENT_FRONT_LEFT] == NULL)
 		return;
 
-	buffer->screen->flush_frontbuffer(buffer->screen, NULL, buffer->textures[ST_ATTACHMENT_FRONT_LEFT],
+	// A hardware driver reads the rendered image back through the context, so
+	// it has to be passed along; the software drivers ignore it.
+	buffer->screen->flush_frontbuffer(buffer->screen, context->st->pipe,
+		buffer->textures[ST_ATTACHMENT_FRONT_LEFT],
 		0, 0, buffer->winsysContext, NULL);
 }
 

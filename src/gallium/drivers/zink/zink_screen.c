@@ -23,6 +23,8 @@
 
 #include "zink_screen.h"
 
+#include "util/u_threaded_context.h"
+
 #include "zink_compiler.h"
 #include "zink_context.h"
 #include "zink_device_info.h"
@@ -1330,6 +1332,146 @@ init_queue(struct zink_screen *screen)
       screen->thread_queue = screen->queue;
 }
 
+// Copy the rendered image straight into the memory the window system handed us,
+// with the GPU, so the frame never travels through the CPU. The memory is
+// imported once and kept until the window system hands us a different buffer.
+static bool
+present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
+                         struct zink_resource *res, void *map, unsigned stride,
+                         struct pipe_resource *pres, unsigned level,
+                         unsigned layer)
+{
+   if (ctx == NULL)
+      return false;
+
+   const unsigned height = u_minify(pres->height0, level);
+   const unsigned alignment =
+      screen->info.ext_host_mem_props.minImportedHostPointerAlignment;
+   if (alignment == 0 || ((uintptr_t)map & (alignment - 1)) != 0)
+      return false;
+
+   const uint64_t size = align64((uint64_t)stride * height, alignment);
+
+   /* Find the buffer among the ones we have already imported, or import it
+    * into the first free slot.
+    */
+   unsigned slot = ARRAY_SIZE(screen->present_imports);
+   for (unsigned i = 0; i < ARRAY_SIZE(screen->present_imports); i++) {
+      if (screen->present_imports[i].map == map &&
+          screen->present_imports[i].size >= size) {
+         slot = i;
+         break;
+      }
+      if (screen->present_imports[i].map == NULL && slot == ARRAY_SIZE(screen->present_imports))
+         slot = i;
+   }
+   if (slot == ARRAY_SIZE(screen->present_imports))
+      return false;
+
+   if (screen->present_imports[slot].map != map ||
+       screen->present_imports[slot].size < size) {
+      if (screen->present_imports[slot].buffer != VK_NULL_HANDLE) {
+         VKSCR(DestroyBuffer)(screen->dev, screen->present_imports[slot].buffer, NULL);
+         VKSCR(FreeMemory)(screen->dev, screen->present_imports[slot].memory, NULL);
+         screen->present_imports[slot].buffer = VK_NULL_HANDLE;
+         screen->present_imports[slot].memory = VK_NULL_HANDLE;
+         screen->present_imports[slot].map = NULL;
+      }
+
+      VkMemoryHostPointerPropertiesEXT props = {
+         VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT
+      };
+      if (VKSCR(GetMemoryHostPointerPropertiesEXT)(screen->dev,
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+             map, &props) != VK_SUCCESS || props.memoryTypeBits == 0)
+         return false;
+
+      VkImportMemoryHostPointerInfoEXT import = {
+         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+         .pHostPointer = map,
+      };
+      VkMemoryAllocateInfo mai = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .pNext = &import,
+         .allocationSize = size,
+         .memoryTypeIndex = ffs(props.memoryTypeBits) - 1,
+      };
+      if (VKSCR(AllocateMemory)(screen->dev, &mai, NULL,
+                                &screen->present_imports[slot].memory) != VK_SUCCESS)
+         return false;
+
+      VkBufferCreateInfo bci = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         .size = size,
+         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      };
+      if (VKSCR(CreateBuffer)(screen->dev, &bci, NULL,
+                              &screen->present_imports[slot].buffer) != VK_SUCCESS) {
+         VKSCR(FreeMemory)(screen->dev, screen->present_imports[slot].memory, NULL);
+         screen->present_imports[slot].memory = VK_NULL_HANDLE;
+         return false;
+      }
+      if (VKSCR(BindBufferMemory)(screen->dev, screen->present_imports[slot].buffer,
+                                  screen->present_imports[slot].memory, 0) != VK_SUCCESS) {
+         VKSCR(DestroyBuffer)(screen->dev, screen->present_imports[slot].buffer, NULL);
+         VKSCR(FreeMemory)(screen->dev, screen->present_imports[slot].memory, NULL);
+         screen->present_imports[slot].buffer = VK_NULL_HANDLE;
+         screen->present_imports[slot].memory = VK_NULL_HANDLE;
+         return false;
+      }
+
+      screen->present_imports[slot].map = map;
+      screen->present_imports[slot].size = size;
+   }
+
+   struct zink_batch *batch = &ctx->batch;
+   zink_batch_no_rp(ctx);
+   zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               VK_ACCESS_TRANSFER_READ_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+   const unsigned blocksize = util_format_get_blocksize(pres->format);
+   VkBufferImageCopy region = {
+      .bufferOffset = 0,
+      .bufferRowLength = blocksize ? stride / blocksize : 0,
+      .bufferImageHeight = height,
+      .imageSubresource = {
+         .aspectMask = res->aspect,
+         .mipLevel = level,
+         .baseArrayLayer = layer,
+         .layerCount = 1,
+      },
+      .imageExtent = { u_minify(pres->width0, level), height, 1 },
+   };
+   VKCTX(CmdCopyImageToBuffer)(batch->state->cmdbuf, res->obj->image,
+                               res->layout,
+                               screen->present_imports[slot].buffer, 1, &region);
+
+   // The window system reads the memory as soon as we return, so the copy has
+   // to have happened by then.
+   ctx->base.flush(&ctx->base, NULL, 0);
+   zink_fence_wait(&ctx->base);
+   return true;
+}
+
+// Show the frame that is already in the window system's buffer again, without
+// touching the GPU: what a window needs when it is merely redrawn.
+void
+zink_display_frontbuffer(struct pipe_screen *pscreen,
+                         struct pipe_resource *pres,
+                         void *winsys_drawable_handle,
+                         struct pipe_box *sub_box)
+{
+   struct zink_screen *screen = zink_screen(pscreen);
+   struct zink_resource *res = zink_resource(pres);
+
+   if (screen->winsys != NULL && res->dt != NULL) {
+      screen->winsys->displaytarget_display(screen->winsys, res->dt,
+                                            winsys_drawable_handle, sub_box);
+   }
+}
+
 static void
 zink_flush_frontbuffer(struct pipe_screen *pscreen,
                        struct pipe_context *pcontext,
@@ -1345,6 +1487,19 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
    if (!winsys)
      return;
    void *map = winsys->displaytarget_map(winsys, res->dt, 0);
+
+   if (map && pcontext != NULL && screen->info.have_EXT_external_memory_host &&
+       getenv("ZINK_NO_HOST_PRESENT") == NULL &&
+       present_into_host_memory(screen,
+                                /* the frontend hands us the threaded
+                                 * context's wrapper; the work below goes
+                                 * straight to the driver's own context */
+                                zink_context(threaded_context_unwrap_sync(pcontext)),
+                                res, map, res->dt_stride, pres, level, layer)) {
+      winsys->displaytarget_unmap(winsys, res->dt);
+      winsys->displaytarget_display(winsys, res->dt, winsys_drawable_handle, sub_box);
+      return;
+   }
 
    if (map) {
       struct pipe_transfer *transfer = NULL;

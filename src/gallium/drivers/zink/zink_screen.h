@@ -177,6 +177,18 @@ struct zink_screen {
    } null_descriptor_hashes;
 
    VkExtent2D maxSampleLocationGridSize[5];
+
+   /* The window system's own buffers, imported so that the GPU can present
+    * into them instead of the frame travelling through the CPU.  There is one
+    * per buffer the window system rotates through, and importing is dear
+    * enough that they are worth keeping.
+    */
+   struct {
+      void *map;
+      uint64_t size;
+      VkDeviceMemory memory;
+      VkBuffer buffer;
+   } present_imports[4];
 };
 
 

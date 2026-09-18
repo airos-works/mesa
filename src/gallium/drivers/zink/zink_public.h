@@ -31,6 +31,12 @@ struct pipe_screen_config;
 struct pipe_screen *
 zink_create_screen(struct sw_winsys *winsys);
 
+void
+zink_display_frontbuffer(struct pipe_screen *pscreen,
+                         struct pipe_resource *pres,
+                         void *winsys_drawable_handle,
+                         struct pipe_box *sub_box);
+
 struct pipe_screen *
 zink_drm_create_screen(int fd, const struct pipe_screen_config *config);
 #endif

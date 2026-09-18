@@ -385,11 +385,11 @@ GalliumContext::Draw(context_id contextID, BRect updateRect)
 	if (buffer->textures[ST_ATTACHMENT_FRONT_LEFT] == NULL)
 		return;
 
-	// A hardware driver reads the rendered image back through the context, so
-	// it has to be passed along; the software drivers ignore it.
-	buffer->screen->flush_frontbuffer(buffer->screen, context->st->pipe,
-		buffer->textures[ST_ATTACHMENT_FRONT_LEFT],
-		0, 0, buffer->winsysContext, NULL);
+	// This runs on the window's thread while the application's own thread may
+	// be drawing, so it must not touch the GPU: the front buffer the window
+	// system holds already has the last frame in it, so just show it again.
+	zink_display_frontbuffer(buffer->screen,
+		buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->winsysContext, NULL);
 }
 
 

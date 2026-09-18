@@ -67,6 +67,11 @@ EXTENSIONS = [
     Extension("VK_KHR_external_memory_fd"),
     Extension("VK_KHR_external_semaphore_fd"),
     Extension("VK_EXT_external_memory_dma_buf"),
+    # Lets the frame be copied straight into the memory the window system
+    # gave us, instead of through the CPU.
+    Extension("VK_EXT_external_memory_host",
+        alias="ext_host_mem",
+        properties=True),
     Extension("VK_EXT_queue_family_foreign"),
     Extension("VK_EXT_provoking_vertex",
        alias="pv",

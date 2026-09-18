@@ -1365,8 +1365,13 @@ present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
       if (screen->present_imports[i].map == NULL && slot == ARRAY_SIZE(screen->present_imports))
          slot = i;
    }
-   if (slot == ARRAY_SIZE(screen->present_imports))
-      return false;
+   if (slot == ARRAY_SIZE(screen->present_imports)) {
+      /* All slots are taken by buffers we no longer see - a window that was
+       * resized, for instance. The work that used them has long finished, so
+       * the oldest can go.
+       */
+      slot = 0;
+   }
 
    if (screen->present_imports[slot].map != map ||
        screen->present_imports[slot].size < size) {

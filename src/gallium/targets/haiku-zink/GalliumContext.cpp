@@ -50,6 +50,7 @@ extern "C" {
 
 int32 GalliumContext::fDisplayRefCount = 0;
 hgl_display* GalliumContext::fDisplay = NULL;
+bool GalliumContext::fIsZink = false;
 
 GalliumContext::GalliumContext(ulong options)
 	:
@@ -105,6 +106,7 @@ GalliumContext::CreateDisplay()
 	struct pipe_screen* screen = NULL;
 	if (getenv("HGL_NO_ZINK") == NULL)
 		screen = zink_create_screen(winsys);
+	fIsZink = screen != NULL;
 	if (screen == NULL) {
 		ERROR("%s: no Vulkan device, falling back to software\n", __func__);
 		screen = sw_screen_create(winsys);
@@ -388,6 +390,15 @@ GalliumContext::Draw(context_id contextID, BRect updateRect)
 	// This runs on the window's thread while the application's own thread may
 	// be drawing, so it must not go near the application's context.
 	//
+	// Both of these reach inside a Zink screen, so neither may be called when
+	// the software rasterizer is standing in for one.
+	if (!fIsZink) {
+		buffer->screen->flush_frontbuffer(buffer->screen, NULL,
+			buffer->textures[ST_ATTACHMENT_FRONT_LEFT], 0, 0,
+			buffer->winsysContext, NULL);
+		return;
+	}
+
 	// A window drawn into the screen itself has nothing in the window system's
 	// bitmap, so the last frame is put back from the front buffer instead -
 	// which only happens once the application has stopped drawing, since while

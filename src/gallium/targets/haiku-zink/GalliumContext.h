@@ -48,6 +48,10 @@ private:
 		ulong				fOptions;
 		static int32		fDisplayRefCount;
 		static hgl_display*	fDisplay;
+		// Whether the screen really is a Zink one: the software rasterizer
+		// stands in when no Vulkan device can be used, and the calls that
+		// reach inside a Zink screen must not be made on it.
+		static bool			fIsZink;
 
 		// Context Management
 		struct hgl_context*	fContext[CONTEXT_MAX];

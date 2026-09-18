@@ -23,6 +23,11 @@
 
 #include "zink_screen.h"
 
+#ifdef __HAIKU__
+#include "vk_haiku_scanout.h"
+#include "hgl_sw_winsys.h"
+#endif
+
 #include "util/u_threaded_context.h"
 
 #include "zink_compiler.h"
@@ -1203,6 +1208,27 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       VKSCR(DestroyDebugUtilsMessengerEXT)(screen->instance, screen->debugUtilsCallbackHandle, NULL);
    }
 
+   /* Give the window system's buffers back before the device goes away, so
+    * the driver stops holding their pages.
+    */
+#ifdef __HAIKU__
+   if (screen->scanout.buffer != VK_NULL_HANDLE) {
+      VKSCR(DestroyBuffer)(screen->dev, screen->scanout.buffer, NULL);
+      VKSCR(FreeMemory)(screen->dev, screen->scanout.memory, NULL);
+      screen->scanout.buffer = VK_NULL_HANDLE;
+      screen->scanout.memory = VK_NULL_HANDLE;
+   }
+#endif
+   for (unsigned i = 0; i < ARRAY_SIZE(screen->present_imports); i++) {
+      if (screen->present_imports[i].buffer != VK_NULL_HANDLE) {
+         VKSCR(DestroyBuffer)(screen->dev, screen->present_imports[i].buffer, NULL);
+         VKSCR(FreeMemory)(screen->dev, screen->present_imports[i].memory, NULL);
+         screen->present_imports[i].buffer = VK_NULL_HANDLE;
+         screen->present_imports[i].memory = VK_NULL_HANDLE;
+         screen->present_imports[i].map = NULL;
+      }
+   }
+
    if (!screen->info.have_KHR_imageless_framebuffer) {
       hash_table_foreach(&screen->framebuffer_cache, entry) {
          struct zink_framebuffer* fb = (struct zink_framebuffer*)entry->data;
@@ -1460,6 +1486,166 @@ present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
    return true;
 }
 
+
+#ifdef __HAIKU__
+// Take hold of the screen's frame buffer, which the graphics driver publishes
+// and shares. It is video memory, so a frame copied there does not cross the
+// bus at all - a 1920x1080 frame costs about a millisecond instead of three.
+static bool
+acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
+{
+   if (screen->scanout.buffer != VK_NULL_HANDLE) {
+      if (screen->scanout.row_pitch == bytes_per_row)
+         return true;
+
+      /* The mode changed under us; the frame buffer we hold is the old one. */
+      VKSCR(DestroyBuffer)(screen->dev, screen->scanout.buffer, NULL);
+      VKSCR(FreeMemory)(screen->dev, screen->scanout.memory, NULL);
+      memset(&screen->scanout, 0, sizeof(screen->scanout));
+   }
+   if (screen->scanout.tried)
+      return false;
+   screen->scanout.tried = true;
+
+   uint32_t type = UINT32_MAX;
+   for (uint32_t i = 0; i < screen->info.mem_props.memoryTypeCount; i++) {
+      if (screen->info.mem_props.memoryTypes[i].propertyFlags &
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+         type = i;
+         break;
+      }
+   }
+   if (type == UINT32_MAX)
+      return false;
+
+   VkImportScanoutMemoryHAIKU scanout = {
+      .sType = VK_STRUCTURE_TYPE_IMPORT_SCANOUT_MEMORY_HAIKU,
+   };
+   VkMemoryAllocateInfo mai = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &scanout,
+      .allocationSize = 0,
+      .memoryTypeIndex = type,
+   };
+   VkDeviceMemory memory;
+   if (VKSCR(AllocateMemory)(screen->dev, &mai, NULL, &memory) != VK_SUCCESS)
+      return false;
+
+   if (scanout.rowPitch != bytes_per_row) {
+      /* Not the frame buffer the window system is showing. */
+      VKSCR(FreeMemory)(screen->dev, memory, NULL);
+      return false;
+   }
+
+   VkBufferCreateInfo bci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = scanout.size,
+      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+   };
+   VkBuffer buffer;
+   if (VKSCR(CreateBuffer)(screen->dev, &bci, NULL, &buffer) != VK_SUCCESS) {
+      VKSCR(FreeMemory)(screen->dev, memory, NULL);
+      return false;
+   }
+   if (VKSCR(BindBufferMemory)(screen->dev, buffer, memory, 0) != VK_SUCCESS) {
+      VKSCR(DestroyBuffer)(screen->dev, buffer, NULL);
+      VKSCR(FreeMemory)(screen->dev, memory, NULL);
+      return false;
+   }
+
+   screen->scanout.memory = memory;
+   screen->scanout.buffer = buffer;
+   screen->scanout.width = scanout.width;
+   screen->scanout.height = scanout.height;
+   screen->scanout.row_pitch = scanout.rowPitch;
+   screen->scanout.size = scanout.size;
+   screen->scanout.tried = false;
+   return true;
+}
+
+// Put the frame on the screen where the window is, copying only the parts of
+// it the window system says are visible.
+static bool
+present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
+                     struct zink_resource *res, struct pipe_resource *pres,
+                     unsigned level, unsigned layer,
+                     const struct hgl_scanout_target *target)
+{
+   if (ctx == NULL)
+      return false;
+
+   const unsigned blocksize = util_format_get_blocksize(pres->format);
+   if (blocksize != 4)
+      return false;
+
+   if (!acquire_scanout(screen, target->bytes_per_row))
+      return false;
+
+   const unsigned width = u_minify(pres->width0, level);
+   const unsigned height = u_minify(pres->height0, level);
+
+   VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
+   unsigned count = 0;
+   for (uint32_t i = 0; i < target->num_clips; i++) {
+      /* The clip list is in screen coordinates and includes both edges. */
+      int32_t left = target->clips[i].left;
+      int32_t top = target->clips[i].top;
+      int32_t right = target->clips[i].right + 1;
+      int32_t bottom = target->clips[i].bottom + 1;
+
+      /* Keep to the part of the window the frame actually covers, and to the
+       * screen: a window can hang off either edge.
+       */
+      left = MAX2(left, target->origin_x);
+      top = MAX2(top, target->origin_y);
+      right = MIN2(right, target->origin_x + (int32_t)width);
+      bottom = MIN2(bottom, target->origin_y + (int32_t)height);
+      left = MAX2(left, 0);
+      top = MAX2(top, 0);
+      right = MIN2(right, (int32_t)screen->scanout.width);
+      bottom = MIN2(bottom, (int32_t)screen->scanout.height);
+      if (right <= left || bottom <= top)
+         continue;
+
+      regions[count++] = (VkBufferImageCopy) {
+         .bufferOffset = (uint64_t)top * screen->scanout.row_pitch
+                         + (uint64_t)left * blocksize,
+         .bufferRowLength = screen->scanout.row_pitch / blocksize,
+         .bufferImageHeight = bottom - top,
+         .imageSubresource = {
+            .aspectMask = res->aspect,
+            .mipLevel = level,
+            .baseArrayLayer = layer,
+            .layerCount = 1,
+         },
+         .imageOffset = {
+            .x = left - target->origin_x,
+            .y = top - target->origin_y,
+            .z = 0,
+         },
+         .imageExtent = { right - left, bottom - top, 1 },
+      };
+   }
+   if (count == 0)
+      return false;
+
+   struct zink_batch *batch = &ctx->batch;
+   zink_batch_no_rp(ctx);
+   zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               VK_ACCESS_TRANSFER_READ_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT);
+   VKCTX(CmdCopyImageToBuffer)(batch->state->cmdbuf, res->obj->image,
+                               res->layout, screen->scanout.buffer,
+                               count, regions);
+
+   /* Nobody reads the result with the processor, so there is nothing to wait
+    * for: submitting is enough, and the frame appears when the copy runs.
+    */
+   ctx->base.flush(&ctx->base, NULL, 0);
+   return true;
+}
+#endif /* __HAIKU__ */
+
 // Show the frame that is already in the window system's buffer again, without
 // touching the GPU: what a window needs when it is merely redrawn.
 void
@@ -1491,6 +1677,23 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
 
    if (!winsys)
      return;
+
+#ifdef __HAIKU__
+   /* A window in direct mode lets us put the frame on the screen ourselves. */
+   struct hgl_scanout_target target;
+   bool into_scanout = false;
+   if (pcontext != NULL && getenv("ZINK_NO_SCANOUT_PRESENT") == NULL &&
+       hgl_winsys_scanout_target(winsys_drawable_handle, &target)) {
+      into_scanout =
+         present_into_scanout(screen,
+                              zink_context(threaded_context_unwrap_sync(pcontext)),
+                              res, pres, level, layer, &target);
+   }
+   hgl_winsys_scanout_presented(winsys_drawable_handle, into_scanout);
+   if (into_scanout)
+      return;
+#endif
+
    void *map = winsys->displaytarget_map(winsys, res->dt, 0);
 
    if (map && pcontext != NULL && screen->info.have_EXT_external_memory_host &&

@@ -27,6 +27,28 @@
 #ifndef _HGL_SOFTWAREWINSYS_H
 #define _HGL_SOFTWAREWINSYS_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
+#define HGL_MAX_SCANOUT_CLIPS 32
+
+// Where a window sits on the screen and which parts of it are visible.
+//
+// A renderer that can write the screen's own frame buffer needs this to put a
+// frame in the right place without painting over anything else. Only a window
+// in direct mode has one; every other window is presented through the bitmap
+// the window system gave us.
+struct hgl_scanout_target {
+	int32_t origin_x;
+	int32_t origin_y;
+	uint32_t bytes_per_row;		// of the screen, to check it is the one we hold
+	uint32_t num_clips;
+	struct {
+		// screen coordinates, the right and bottom edges included
+		int32_t left, top, right, bottom;
+	} clips[HGL_MAX_SCANOUT_CLIPS];
+};
+
 #ifdef __cplusplus
 class BBitmap;
 class BRect;
@@ -34,6 +56,14 @@ class BRect;
 class HGLWinsysContext {
 public:
 	virtual void Display(BBitmap *bitmap, BRect *updateRect) = 0;
+
+	// Returning false means present the ordinary way.
+	virtual bool ScanoutTarget(struct hgl_scanout_target *target)
+		{ (void)target; return false; }
+
+	// Whether the frame just presented went into the screen itself.
+	virtual void PresentedIntoScanout(bool presented)
+		{ (void)presented; }
 };
 #endif
 
@@ -44,6 +74,12 @@ extern "C" {
 struct sw_winsys;
 
 struct sw_winsys* hgl_create_sw_winsys(void);
+
+// The drawable handle a frontend passes to flush_frontbuffer is the window
+// system context; this asks it where its window is.
+bool hgl_winsys_scanout_target(void *contextPrivate,
+	struct hgl_scanout_target *target);
+void hgl_winsys_scanout_presented(void *contextPrivate, bool presented);
 
 #ifdef __cplusplus
 }

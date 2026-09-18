@@ -227,6 +227,29 @@ hgl_winsys_displaytarget_display(struct sw_winsys* winsys,
 }
 
 
+extern "C" bool
+hgl_winsys_scanout_target(void* contextPrivate,
+	struct hgl_scanout_target* target)
+{
+	if (contextPrivate == NULL)
+		return false;
+
+	HGLWinsysContext *context = (HGLWinsysContext*)contextPrivate;
+	return context->ScanoutTarget(target);
+}
+
+
+extern "C" void
+hgl_winsys_scanout_presented(void* contextPrivate, bool presented)
+{
+	if (contextPrivate == NULL)
+		return;
+
+	HGLWinsysContext *context = (HGLWinsysContext*)contextPrivate;
+	context->PresentedIntoScanout(presented);
+}
+
+
 struct sw_winsys*
 hgl_create_sw_winsys()
 {

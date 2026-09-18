@@ -133,7 +133,8 @@ ZinkRenderer::ZinkRenderer(BGLView *view, ulong options)
 	fInfo(NULL),
 	fInfoLocker("info locker"),
 	fOptions(options),
-	fColorSpace(B_NO_COLOR_SPACE)
+	fColorSpace(B_NO_COLOR_SPACE),
+	fPresentedIntoScanout(false)
 {
 	CALLED();
 
@@ -215,10 +216,52 @@ ZinkRenderer::UnlockGL()
 }
 
 
+// Where the window is on the screen, so that the renderer can put the frame
+// there itself. Haiku hands us this in direct mode and keeps it up to date as
+// the window moves and is covered.
+bool
+ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
+{
+	BAutolock lock(fInfoLocker);
+	if (!fDirectModeEnabled || fInfo == NULL)
+		return false;
+	if ((fInfo->buffer_state & B_DIRECT_MODE_MASK) == B_DIRECT_STOP)
+		return false;
+	if (fInfo->clip_list_count == 0
+		|| fInfo->clip_list_count > HGL_MAX_SCANOUT_CLIPS) {
+		return false;
+	}
+
+	target->origin_x = fInfo->window_bounds.left;
+	target->origin_y = fInfo->window_bounds.top;
+	target->bytes_per_row = fInfo->bytes_per_row;
+	target->num_clips = fInfo->clip_list_count;
+	for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
+		target->clips[i].left = fInfo->clip_list[i].left;
+		target->clips[i].top = fInfo->clip_list[i].top;
+		target->clips[i].right = fInfo->clip_list[i].right;
+		target->clips[i].bottom = fInfo->clip_list[i].bottom;
+	}
+	return true;
+}
+
+
+void
+ZinkRenderer::PresentedIntoScanout(bool presented)
+{
+	fPresentedIntoScanout = presented;
+}
+
+
 void
 ZinkRenderer::Display(BBitmap *bitmap, BRect *updateRect)
 {
 //	CALLED();
+
+	if (fPresentedIntoScanout) {
+		// the frame is already on the screen
+		return;
+	}
 
 	if (!fDirectModeEnabled) {
 		// TODO: avoid timeout
@@ -257,6 +300,11 @@ void
 ZinkRenderer::Draw(BRect updateRect)
 {
 //	CALLED();
+	if (fPresentedIntoScanout) {
+		// The screen still holds the frame we drew there; the window system's
+		// bitmap has not had one in it since direct mode started.
+		return;
+	}
 	fContextObj->Draw(fContextID, updateRect);
 }
 
@@ -302,6 +350,7 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 	} else if (fInfo) {
 		free(fInfo);
 		fInfo = NULL;
+		fPresentedIntoScanout = false;
 	}
 }
 

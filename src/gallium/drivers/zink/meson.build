@@ -92,7 +92,9 @@ libzink = static_library(
   'zink',
   [files_libzink, zink_device_info, zink_instance, zink_nir_algebraic_c, vk_dispatch_table],
   gnu_symbol_visibility : 'hidden',
-  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_vulkan_util, inc_zink_vk],
+  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_vulkan_util, inc_zink_vk,
+    # the Haiku window system, for presenting into the screen itself
+    include_directories('../../winsys/sw/hgl')],
   dependencies: [
     dep_vulkan, idep_nir_headers, idep_mesautil, idep_vulkan_util_headers,
     idep_vulkan_wsi_headers, dep_libdrm, idep_vulkan_util

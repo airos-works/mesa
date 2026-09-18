@@ -28,6 +28,9 @@ public:
 			void				UnlockGL();
 
 			void				Display(BBitmap* bitmap, BRect* updateRect);
+			bool				ScanoutTarget(
+									struct hgl_scanout_target* target);
+			void				PresentedIntoScanout(bool presented);
 
 			void				SwapBuffers(bool vsync = false);
 			void				Draw(BRect updateRect);
@@ -49,6 +52,9 @@ private:
 			GLuint				fWidth;
 			GLuint				fHeight;
 			color_space			fColorSpace;
+			// set while the renderer is writing the screen itself, so that a
+			// redraw does not put a stale bitmap over the frame
+			bool				fPresentedIntoScanout;
 };
 
 #endif	// ZINKRENDERER_H

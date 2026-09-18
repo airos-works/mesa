@@ -189,6 +189,19 @@ struct zink_screen {
       VkDeviceMemory memory;
       VkBuffer buffer;
    } present_imports[4];
+
+   /* The screen's own frame buffer, in video memory, which a window in direct
+    * mode is presented into: the frame then never crosses the bus.
+    */
+   struct {
+      VkDeviceMemory memory;
+      VkBuffer buffer;
+      uint32_t width;
+      uint32_t height;
+      uint32_t row_pitch;
+      uint64_t size;
+      bool tried;       /* asked for once; do not ask again if refused */
+   } scanout;
 };
 
 

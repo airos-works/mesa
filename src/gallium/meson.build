@@ -218,6 +218,9 @@ endif
 if with_platform_haiku
   subdir('frontends/hgl')
   subdir('targets/haiku-softpipe')
+  if with_gallium_zink
+    subdir('targets/haiku-zink')
+  endif
 endif
 if with_gallium_st_nine
   subdir('frontends/nine')

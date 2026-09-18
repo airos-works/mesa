@@ -126,7 +126,13 @@ st_upload_constants(struct st_context *st, struct gl_program *prog, gl_shader_st
           * but matrix rows are sometimes allocated partially, so add 12
           * to compensate for the fetch_state defect.
           */
-         u_upload_alloc(pipe->const_uploader, 0, paramBytes + 12, 64,
+         /* The offset has to satisfy the driver's constant buffer alignment:
+          * zink hands it to Vulkan as a dynamic offset, and a pre-Turing
+          * NVIDIA GPU needs 256 bytes there, not the 64 assumed here.
+          */
+         const unsigned alignment =
+            MAX2(64, st->ctx->Const.UniformBufferOffsetAlignment);
+         u_upload_alloc(pipe->const_uploader, 0, paramBytes + 12, alignment,
                         &cb.buffer_offset, &cb.buffer, (void**)&ptr);
 
          int uniform_bytes = params->UniformBytes;

@@ -298,10 +298,29 @@ void
 ZinkRenderer::SwapBuffers(bool vsync)
 {
 	BScreen screen(GLView()->Window());
+
+	// When the frame goes into the screen itself, wait for the display to
+	// finish the frame it is showing before starting to overwrite it. The copy
+	// takes about a millisecond for a whole screen and the display takes
+	// sixteen to draw one, so a copy begun at the blank stays well ahead of
+	// the beam and the frame arrives whole.
+	//
+	// Waiting afterwards, which is what this did, only paces the application:
+	// it does not stop the tearing, because the copy has already happened.
+	// Never wait indefinitely: a display that has been switched off stops
+	// reporting blanks, and an application should carry on drawing rather than
+	// stop dead. Three frames is long enough to be sure one was missed.
+	const bigtime_t kRetraceTimeout = 50000;
+	const bool wait = fPresentedIntoScanout
+		&& (vsync || getenv("HGL_VSYNC") != NULL);
+	if (wait)
+		screen.WaitForRetrace(kRetraceTimeout);
+
 	fContextObj->SwapBuffers(fContextID);
 	fContextObj->Validate(fWidth, fHeight);
-	if (vsync)
-		screen.WaitForRetrace();
+
+	if (vsync && !wait)
+		screen.WaitForRetrace(kRetraceTimeout);
 }
 
 void

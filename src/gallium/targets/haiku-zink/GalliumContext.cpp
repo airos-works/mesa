@@ -386,8 +386,19 @@ GalliumContext::Draw(context_id contextID, BRect updateRect)
 		return;
 
 	// This runs on the window's thread while the application's own thread may
-	// be drawing, so it must not touch the GPU: the front buffer the window
-	// system holds already has the last frame in it, so just show it again.
+	// be drawing, so it must not go near the application's context.
+	//
+	// A window drawn into the screen itself has nothing in the window system's
+	// bitmap, so the last frame is put back from the front buffer instead -
+	// which only happens once the application has stopped drawing, since while
+	// it draws its own next frame repairs the window.
+	if (zink_represent_into_scanout(buffer->screen,
+			buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->winsysContext)) {
+		return;
+	}
+
+	// The front buffer the window system holds already has the last frame in
+	// it, so just show it again.
 	zink_display_frontbuffer(buffer->screen,
 		buffer->textures[ST_ATTACHMENT_FRONT_LEFT], buffer->winsysContext, NULL);
 }

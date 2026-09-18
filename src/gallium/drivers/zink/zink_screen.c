@@ -24,6 +24,7 @@
 #include "zink_screen.h"
 
 #ifdef __HAIKU__
+#include "util/os_time.h"
 #include "vk_haiku_scanout.h"
 #include "hgl_sw_winsys.h"
 #endif
@@ -1212,6 +1213,12 @@ zink_destroy_screen(struct pipe_screen *pscreen)
     * the driver stops holding their pages.
     */
 #ifdef __HAIKU__
+   if (screen->scanout.fence != VK_NULL_HANDLE)
+      VKSCR(DestroyFence)(screen->dev, screen->scanout.fence, NULL);
+   if (screen->scanout.cmdpool != VK_NULL_HANDLE)
+      VKSCR(DestroyCommandPool)(screen->dev, screen->scanout.cmdpool, NULL);
+   screen->scanout.fence = VK_NULL_HANDLE;
+   screen->scanout.cmdpool = VK_NULL_HANDLE;
    if (screen->scanout.buffer != VK_NULL_HANDLE) {
       VKSCR(DestroyBuffer)(screen->dev, screen->scanout.buffer, NULL);
       VKSCR(FreeMemory)(screen->dev, screen->scanout.memory, NULL);
@@ -1351,6 +1358,9 @@ static void
 init_queue(struct zink_screen *screen)
 {
    simple_mtx_init(&screen->queue_lock, mtx_plain);
+#ifdef __HAIKU__
+   simple_mtx_init(&screen->scanout.represent_lock, mtx_plain);
+#endif
    vkGetDeviceQueue(screen->dev, screen->gfx_queue, 0, &screen->queue);
    if (screen->threaded && screen->max_queues > 1)
       vkGetDeviceQueue(screen->dev, screen->gfx_queue, 1, &screen->thread_queue);
@@ -1498,10 +1508,18 @@ acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
       if (screen->scanout.row_pitch == bytes_per_row)
          return true;
 
-      /* The mode changed under us; the frame buffer we hold is the old one. */
+      /* The mode changed under us; the frame buffer we hold is the old one.
+       * The command buffer and the lock outlive it.
+       */
       VKSCR(DestroyBuffer)(screen->dev, screen->scanout.buffer, NULL);
       VKSCR(FreeMemory)(screen->dev, screen->scanout.memory, NULL);
-      memset(&screen->scanout, 0, sizeof(screen->scanout));
+      screen->scanout.buffer = VK_NULL_HANDLE;
+      screen->scanout.memory = VK_NULL_HANDLE;
+      screen->scanout.width = 0;
+      screen->scanout.height = 0;
+      screen->scanout.row_pitch = 0;
+      screen->scanout.size = 0;
+      screen->scanout.tried = false;
    }
    if (screen->scanout.tried)
       return false;
@@ -1528,7 +1546,14 @@ acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
       .memoryTypeIndex = type,
    };
    VkDeviceMemory memory;
-   if (VKSCR(AllocateMemory)(screen->dev, &mai, NULL, &memory) != VK_SUCCESS)
+   VkResult ar = VKSCR(AllocateMemory)(screen->dev, &mai, NULL, &memory);
+   if (getenv("ZINK_SCANOUT_TRACE") != NULL) {
+      fprintf(stderr, "zink: the screen is %ux%u, %u bytes a row"
+              " (the window system says %u); taking hold of it: %d\n",
+              scanout.width, scanout.height, scanout.rowPitch, bytes_per_row,
+              ar);
+   }
+   if (ar != VK_SUCCESS)
       return false;
 
    if (scanout.rowPitch != bytes_per_row) {
@@ -1563,28 +1588,18 @@ acquire_scanout(struct zink_screen *screen, uint32_t bytes_per_row)
    return true;
 }
 
-// Put the frame on the screen where the window is, copying only the parts of
-// it the window system says are visible.
-static bool
-present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
-                     struct zink_resource *res, struct pipe_resource *pres,
-                     unsigned level, unsigned layer,
-                     const struct hgl_scanout_target *target)
+// Turn the rectangles the window can be seen through into copies from the
+// frame into the screen, in screen coordinates and clipped to both.
+static unsigned
+scanout_regions(struct zink_screen *screen, struct zink_resource *res,
+                struct pipe_resource *pres, unsigned level, unsigned layer,
+                const struct hgl_scanout_target *target,
+                VkBufferImageCopy *regions)
 {
-   if (ctx == NULL)
-      return false;
-
    const unsigned blocksize = util_format_get_blocksize(pres->format);
-   if (blocksize != 4)
-      return false;
-
-   if (!acquire_scanout(screen, target->bytes_per_row))
-      return false;
-
    const unsigned width = u_minify(pres->width0, level);
    const unsigned height = u_minify(pres->height0, level);
 
-   VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
    unsigned count = 0;
    for (uint32_t i = 0; i < target->num_clips; i++) {
       /* The clip list is in screen coordinates and includes both edges. */
@@ -1626,6 +1641,30 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
          .imageExtent = { right - left, bottom - top, 1 },
       };
    }
+   return count;
+}
+
+// Put the frame on the screen where the window is, copying only the parts of
+// it the window system says are visible.
+static bool
+present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
+                     struct zink_resource *res, struct pipe_resource *pres,
+                     unsigned level, unsigned layer,
+                     const struct hgl_scanout_target *target)
+{
+   if (ctx == NULL)
+      return false;
+
+   const unsigned blocksize = util_format_get_blocksize(pres->format);
+   if (blocksize != 4)
+      return false;
+
+   if (!acquire_scanout(screen, target->bytes_per_row))
+      return false;
+
+   VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
+   const unsigned count = scanout_regions(screen, res, pres, level, layer,
+                                          target, regions);
    if (count == 0)
       return false;
 
@@ -1642,7 +1681,130 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
     * for: submitting is enough, and the frame appears when the copy runs.
     */
    ctx->base.flush(&ctx->base, NULL, 0);
+   screen->scanout.last_present_ns = os_time_get_nano();
    return true;
+}
+
+/* How long after a frame the window's thread leaves the image alone.  While
+ * the application is drawing, its own next frame repairs the window, and the
+ * image is being written and transitioned by its context; once it has stopped,
+ * nothing touches the image and putting the last frame back is safe.
+ */
+#define ZINK_SCANOUT_IDLE_NS (100 * 1000 * 1000)
+
+// Put the last frame back on the screen when something uncovers a window that
+// has stopped drawing. The window system's bitmap has never held a frame on
+// this path, so there is nothing else to show; the front buffer still has it.
+//
+// This runs on the window's thread while the application's thread may be
+// inside the renderer, so it uses a command buffer of its own and touches
+// neither the application's context nor Zink's batches.
+bool
+zink_represent_into_scanout(struct pipe_screen *pscreen,
+                            struct pipe_resource *pres,
+                            void *winsys_drawable_handle)
+{
+   struct zink_screen *screen = zink_screen(pscreen);
+   struct zink_resource *res = zink_resource(pres);
+
+#define RETURN_WHY(reason) do { why = (reason); goto out; } while (0)
+
+   struct hgl_scanout_target target;
+   if (!hgl_winsys_scanout_target(winsys_drawable_handle, &target)) {
+      if (getenv("ZINK_SCANOUT_TRACE") != NULL)
+         fprintf(stderr, "zink: represent: no direct window\n");
+      return false;
+   }
+
+   simple_mtx_lock(&screen->scanout.represent_lock);
+   bool ok = false;
+   const char *why = "";
+   const bool trace = getenv("ZINK_SCANOUT_TRACE") != NULL;
+
+   if (screen->scanout.buffer == VK_NULL_HANDLE ||
+       screen->scanout.row_pitch != target.bytes_per_row)
+      RETURN_WHY("no scanout held");
+
+   if (os_time_get_nano() - screen->scanout.last_present_ns
+          < ZINK_SCANOUT_IDLE_NS)
+      RETURN_WHY("still drawing");
+
+   /* The application left the image where the present put it; if anything has
+    * moved it since, its context owns the image and we stay away.
+    */
+   if (res->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+      RETURN_WHY("the image has moved");
+
+   VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
+   const unsigned count = scanout_regions(screen, res, pres, 0, 0, &target,
+                                          regions);
+   if (count == 0)
+      RETURN_WHY("nothing visible");
+
+   if (screen->scanout.cmdpool == VK_NULL_HANDLE) {
+      VkCommandPoolCreateInfo cpci = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+         .queueFamilyIndex = screen->gfx_queue,
+      };
+      if (VKSCR(CreateCommandPool)(screen->dev, &cpci, NULL,
+                                   &screen->scanout.cmdpool) != VK_SUCCESS)
+         goto out;
+
+      VkCommandBufferAllocateInfo cbai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = screen->scanout.cmdpool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+      if (VKSCR(AllocateCommandBuffers)(screen->dev, &cbai,
+                                        &screen->scanout.cmdbuf) != VK_SUCCESS)
+         goto out;
+
+      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+      if (VKSCR(CreateFence)(screen->dev, &fci, NULL,
+                             &screen->scanout.fence) != VK_SUCCESS)
+         goto out;
+   }
+
+   VkCommandBufferBeginInfo cbbi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+   };
+   VKSCR(ResetCommandBuffer)(screen->scanout.cmdbuf, 0);
+   if (VKSCR(BeginCommandBuffer)(screen->scanout.cmdbuf, &cbbi) != VK_SUCCESS)
+      goto out;
+   VKSCR(CmdCopyImageToBuffer)(screen->scanout.cmdbuf, res->obj->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               screen->scanout.buffer, count, regions);
+   if (VKSCR(EndCommandBuffer)(screen->scanout.cmdbuf) != VK_SUCCESS)
+      goto out;
+
+   VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &screen->scanout.cmdbuf,
+   };
+   VKSCR(ResetFences)(screen->dev, 1, &screen->scanout.fence);
+   simple_mtx_lock(&screen->queue_lock);
+   VkResult result = VKSCR(QueueSubmit)(screen->queue, 1, &si,
+                                        screen->scanout.fence);
+   simple_mtx_unlock(&screen->queue_lock);
+   if (result != VK_SUCCESS)
+      goto out;
+
+   VKSCR(WaitForFences)(screen->dev, 1, &screen->scanout.fence, VK_TRUE,
+                        UINT64_MAX);
+   ok = true;
+
+out:
+   if (trace) {
+      fprintf(stderr, "zink: represent: %s\n",
+              ok ? "the last frame is back on the screen" : why);
+   }
+   simple_mtx_unlock(&screen->scanout.represent_lock);
+   return ok;
+#undef RETURN_WHY
 }
 #endif /* __HAIKU__ */
 
@@ -1690,6 +1852,13 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
                               res, pres, level, layer, &target);
    }
    hgl_winsys_scanout_presented(winsys_drawable_handle, into_scanout);
+   if (getenv("ZINK_SCANOUT_TRACE") != NULL) {
+      static int said = -1;
+      if (said != (int)into_scanout) {
+         fprintf(stderr, "zink: present into the screen: %d\n", into_scanout);
+         said = into_scanout;
+      }
+   }
    if (into_scanout)
       return;
 #endif

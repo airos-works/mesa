@@ -227,6 +227,8 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 		return false;
 	if ((fInfo->buffer_state & B_DIRECT_MODE_MASK) == B_DIRECT_STOP)
 		return false;
+	// Nothing of the window can be seen - the screen saver has covered it, or
+	// it has more pieces than we can copy in one go.
 	if (fInfo->clip_list_count == 0
 		|| fInfo->clip_list_count > HGL_MAX_SCANOUT_CLIPS) {
 		return false;
@@ -300,11 +302,9 @@ void
 ZinkRenderer::Draw(BRect updateRect)
 {
 //	CALLED();
-	if (fPresentedIntoScanout) {
-		// The screen still holds the frame we drew there; the window system's
-		// bitmap has not had one in it since direct mode started.
-		return;
-	}
+	// When the frame went into the screen itself the window system's bitmap
+	// has nothing in it, so the renderer puts the last frame back instead of
+	// showing the bitmap; it knows which of the two this is.
 	fContextObj->Draw(fContextID, updateRect);
 }
 
@@ -340,18 +340,44 @@ void
 ZinkRenderer::DirectConnected(direct_buffer_info *info)
 {
 //	CALLED();
-	BAutolock lock(fInfoLocker);
-	if (info) {
-		if (!fInfo) {
-			fInfo = (direct_buffer_info *)calloc(1,
-				DIRECT_BUFFER_INFO_AREA_SIZE);
+	bool repaint = false;
+	{
+		BAutolock lock(fInfoLocker);
+		if (info) {
+			if (!fInfo) {
+				fInfo = (direct_buffer_info *)calloc(1,
+					DIRECT_BUFFER_INFO_AREA_SIZE);
+			}
+			memcpy(fInfo, info, DIRECT_BUFFER_INFO_AREA_SIZE);
+			repaint = fPresentedIntoScanout
+				&& (info->buffer_state & B_DIRECT_MODE_MASK) != B_DIRECT_STOP;
+		} else if (fInfo) {
+			free(fInfo);
+			fInfo = NULL;
+			fPresentedIntoScanout = false;
 		}
-		memcpy(fInfo, info, DIRECT_BUFFER_INFO_AREA_SIZE);
-	} else if (fInfo) {
-		free(fInfo);
-		fInfo = NULL;
-		fPresentedIntoScanout = false;
 	}
+
+	// This is how a direct window is told that it has been uncovered or moved:
+	// the window system clears what it exposed and expects the window to paint
+	// it again. Nothing is in the window system's bitmap when the frame went
+	// into the screen itself, so the renderer puts the last one back - which
+	// it only does once the application has stopped drawing, since while it
+	// draws its own next frame repairs the window.
+	if (getenv("ZINK_SCANOUT_TRACE") != NULL) {
+		fprintf(stderr, "zink: DirectConnected: state %#x, repaint %d, "
+			"%" B_PRIu32 " clips, window %d,%d-%d,%d, bits %p, bpr %" B_PRIu32 "\n",
+			info != NULL ? info->buffer_state : 0, repaint,
+			info != NULL ? info->clip_list_count : 0,
+			info != NULL ? (int)info->window_bounds.left : 0,
+			info != NULL ? (int)info->window_bounds.top : 0,
+			info != NULL ? (int)info->window_bounds.right : 0,
+			info != NULL ? (int)info->window_bounds.bottom : 0,
+			info != NULL ? info->bits : NULL,
+			info != NULL ? info->bytes_per_row : 0);
+	}
+	if (repaint)
+		fContextObj->Draw(fContextID, BRect());
 }
 
 

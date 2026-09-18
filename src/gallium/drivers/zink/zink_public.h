@@ -24,7 +24,10 @@
 #ifndef ZINK_PUBLIC_H
 #define ZINK_PUBLIC_H
 
+#include <stdbool.h>
+
 struct pipe_screen;
+struct pipe_resource;
 struct sw_winsys;
 struct pipe_screen_config;
 
@@ -36,6 +39,15 @@ zink_display_frontbuffer(struct pipe_screen *pscreen,
                          struct pipe_resource *pres,
                          void *winsys_drawable_handle,
                          struct pipe_box *sub_box);
+
+/* Put the frame that is already in the front buffer back on the screen, from
+ * the window's thread, without touching the application's context.  Returns
+ * false if it could not, in which case the caller falls back.
+ */
+bool
+zink_represent_into_scanout(struct pipe_screen *pscreen,
+                            struct pipe_resource *pres,
+                            void *winsys_drawable_handle);
 
 struct pipe_screen *
 zink_drm_create_screen(int fd, const struct pipe_screen_config *config);

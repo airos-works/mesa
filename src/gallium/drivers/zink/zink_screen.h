@@ -201,6 +201,16 @@ struct zink_screen {
       uint32_t row_pitch;
       uint64_t size;
       bool tried;       /* asked for once; do not ask again if refused */
+
+      /* For putting the last frame back when a window that has stopped
+       * drawing is uncovered.  This runs on the window's thread, so it has a
+       * command buffer of its own and never touches the application's context.
+       */
+      simple_mtx_t represent_lock;
+      VkCommandPool cmdpool;
+      VkCommandBuffer cmdbuf;
+      VkFence fence;
+      int64_t last_present_ns;
    } scanout;
 };
 

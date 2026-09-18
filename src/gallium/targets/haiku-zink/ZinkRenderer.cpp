@@ -258,6 +258,14 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 	if (fInfo->pixel_format != B_RGB32 && fInfo->pixel_format != B_RGBA32)
 		return false;
 
+	// Switching to another workspace takes the window off the screen, and what
+	// comes back describes no frame buffer at all: no address, and a row of
+	// zero bytes. Believing it means going back to the driver for a frame
+	// buffer of that shape on every frame, which gets nowhere and takes the
+	// program with it.
+	if (fInfo->bits == NULL || fInfo->bytes_per_row == 0)
+		return false;
+
 	// A window that has just moved leaves the strip it came off behind for the
 	// window system to repaint, and a program drawing into the screen at a
 	// thousand frames a second outruns that repaint: the strips linger, one

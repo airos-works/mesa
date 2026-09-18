@@ -1533,6 +1533,10 @@ acquire_scanout_locked(struct zink_screen *screen,
 {
    const uint32_t bytes_per_row = target->bytes_per_row;
 
+   /* Nothing describes a frame buffer of no width; keep what we have. */
+   if (bytes_per_row == 0 || target->bits == NULL)
+      return false;
+
    if (screen->scanout.buffer != VK_NULL_HANDLE) {
       if (screen->scanout.bits == target->bits &&
           screen->scanout.row_pitch == bytes_per_row)

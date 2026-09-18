@@ -134,7 +134,8 @@ ZinkRenderer::ZinkRenderer(BGLView *view, ulong options)
 	fInfoLocker("info locker"),
 	fOptions(options),
 	fColorSpace(B_NO_COLOR_SPACE),
-	fPresentedIntoScanout(false)
+	fPresentedIntoScanout(false),
+	fScanoutTargetHeld(false)
 {
 	CALLED();
 
@@ -219,10 +220,28 @@ ZinkRenderer::UnlockGL()
 // Where the window is on the screen, so that the renderer can put the frame
 // there itself. Haiku hands us this in direct mode and keeps it up to date as
 // the window moves and is covered.
+// How long after a window moves before it is drawn into the screen again. Long
+// enough to outlast the window system's repaint of what the window came off,
+// short enough that letting go of a dragged window feels immediate.
+static const bigtime_t kSettleAfterMove = 250000;
+
+
 bool
 ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 {
-	BAutolock lock(fInfoLocker);
+	// Held until PresentedIntoScanout, so that the window cannot move between
+	// its clipping being read and the copy being sent to the screen. Anything
+	// that would move it goes through DirectConnected, which takes the same
+	// lock.
+	fInfoLocker.Lock();
+	fScanoutTargetHeld = true;
+
+	struct Failed {
+		ZinkRenderer &self;
+		bool ok = false;
+		~Failed() { if (!ok) self.ReleaseScanoutTarget(); }
+	} failed {*this};
+
 	if (!fDirectModeEnabled || fInfo == NULL)
 		return false;
 	if ((fInfo->buffer_state & B_DIRECT_MODE_MASK) == B_DIRECT_STOP)
@@ -239,6 +258,17 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 	if (fInfo->pixel_format != B_RGB32 && fInfo->pixel_format != B_RGBA32)
 		return false;
 
+	// A window that has just moved leaves the strip it came off behind for the
+	// window system to repaint, and a program drawing into the screen at a
+	// thousand frames a second outruns that repaint: the strips linger, one
+	// per move, until the window stops. Presenting through the window system's
+	// bitmap instead is slower and has no such trouble, so that is what a
+	// moving window gets. Only while it is moving - a window is still almost
+	// all of the time.
+	if (system_time() - fLastPlacementChange < kSettleAfterMove)
+		return false;
+
+	failed.ok = true;
 	target->origin_x = fInfo->window_bounds.left;
 	target->origin_y = fInfo->window_bounds.top;
 	target->bits = fInfo->bits;
@@ -255,9 +285,22 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 
 
 void
+ZinkRenderer::ReleaseScanoutTarget()
+{
+	if (fScanoutTargetHeld) {
+		fScanoutTargetHeld = false;
+		fInfoLocker.Unlock();
+	}
+}
+
+
+void
 ZinkRenderer::PresentedIntoScanout(bool presented)
 {
 	fPresentedIntoScanout = presented;
+	if (presented)
+		fPresentCount++;
+	ReleaseScanoutTarget();
 }
 
 
@@ -367,6 +410,8 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 //	CALLED();
 	bool repaint = false;
 	{
+		// Taking this waits for any present that is part way through reading
+		// the window's placement and sending its copy.
 		BAutolock lock(fInfoLocker);
 		if (info) {
 			if (!fInfo) {
@@ -374,6 +419,11 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 					DIRECT_BUFFER_INFO_AREA_SIZE);
 			}
 			memcpy(fInfo, info, DIRECT_BUFFER_INFO_AREA_SIZE);
+			if ((info->buffer_state
+					& (B_BUFFER_MOVED | B_BUFFER_RESIZED | B_CLIPPING_MODIFIED))
+					!= 0) {
+				fLastPlacementChange = system_time();
+			}
 			repaint = fPresentedIntoScanout
 				&& (info->buffer_state & B_DIRECT_MODE_MASK) != B_DIRECT_STOP;
 		} else if (fInfo) {
@@ -400,6 +450,9 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 			info != NULL ? (int)info->window_bounds.bottom : 0,
 			info != NULL ? info->bits : NULL,
 			info != NULL ? info->bytes_per_row : 0);
+		fprintf(stderr, "       presents since the last one: %" B_PRId32 "\n",
+			fPresentCount);
+		fPresentCount = 0;
 	}
 	if (repaint)
 		fContextObj->Draw(fContextID, BRect());

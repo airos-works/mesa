@@ -60,11 +60,15 @@ class HGLWinsysContext {
 public:
 	virtual void Display(BBitmap *bitmap, BRect *updateRect) = 0;
 
-	// Returning false means present the ordinary way.
+	// Returning false means present the ordinary way. Returning true holds
+	// the window still - its placement cannot change - until
+	// PresentedIntoScanout says what happened, so that a copy cannot be sent
+	// to where the window used to be.
 	virtual bool ScanoutTarget(struct hgl_scanout_target *target)
 		{ (void)target; return false; }
 
-	// Whether the frame just presented went into the screen itself.
+	// Whether the frame just presented went into the screen itself. Lets the
+	// window move again.
 	virtual void PresentedIntoScanout(bool presented)
 		{ (void)presented; }
 };

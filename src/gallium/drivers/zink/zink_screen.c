@@ -1709,10 +1709,17 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
                                res->layout, screen->scanout.buffer,
                                count, regions);
 
-   /* Nobody reads the result with the processor, so there is nothing to wait
-    * for: submitting is enough, and the frame appears when the copy runs.
+   /* Wait for it to have happened, not merely to have been sent.
+    *
+    * The copy is aimed at where the window was when its clipping was read,
+    * and the window system is held off only until this returns - it moves
+    * windows the moment a direct window says it has stopped drawing. Batches
+    * are submitted on another thread, so letting go here would let a copy
+    * land after the window had moved, painting the frame where the window
+    * used to be.
     */
    ctx->base.flush(&ctx->base, NULL, 0);
+   zink_fence_wait(&ctx->base);
    screen->scanout.last_present_ns = os_time_get_nano();
    return true;
 }

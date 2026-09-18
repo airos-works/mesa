@@ -31,6 +31,7 @@ public:
 			bool				ScanoutTarget(
 									struct hgl_scanout_target* target);
 			void				PresentedIntoScanout(bool presented);
+			void				ReleaseScanoutTarget();
 
 			void				SwapBuffers(bool vsync = false);
 			void				Draw(BRect updateRect);
@@ -55,6 +56,11 @@ private:
 			// set while the renderer is writing the screen itself, so that a
 			// redraw does not put a stale bitmap over the frame
 			bool				fPresentedIntoScanout;
+			// whether ScanoutTarget took fInfoLocker and still holds it
+			bool				fScanoutTargetHeld;
+			int32				fPresentCount = 0;
+			// when the window last moved or its clipping changed
+			bigtime_t			fLastPlacementChange = 0;
 };
 
 #endif	// ZINKRENDERER_H

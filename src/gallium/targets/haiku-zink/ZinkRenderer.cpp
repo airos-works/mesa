@@ -234,6 +234,11 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 		return false;
 	}
 
+	// The frame is copied into the screen a pixel at a time with no conversion,
+	// so the two have to agree on what a pixel is.
+	if (fInfo->pixel_format != B_RGB32 && fInfo->pixel_format != B_RGBA32)
+		return false;
+
 	target->origin_x = fInfo->window_bounds.left;
 	target->origin_y = fInfo->window_bounds.top;
 	target->bits = fInfo->bits;

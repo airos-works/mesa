@@ -1498,12 +1498,38 @@ present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
 
 
 #ifdef __HAIKU__
+static bool acquire_scanout_locked(struct zink_screen *screen,
+                                   const struct hgl_scanout_target *target);
+
 // Take hold of the screen's frame buffer, which the graphics driver publishes
 // and shares. It is video memory, so a frame copied there does not cross the
 // bus at all - a 1920x1080 frame costs about a millisecond instead of three.
+//
+// This runs on the application's thread while the window's thread may be
+// putting the last frame back through the same buffer, so the buffer is only
+// ever replaced with the lock held. Finding it unchanged, which is every frame
+// but the first and the ones after a mode set, takes no lock at all.
 static bool
 acquire_scanout(struct zink_screen *screen,
                 const struct hgl_scanout_target *target)
+{
+   const uint32_t bytes_per_row = target->bytes_per_row;
+
+   /* The common case: the buffer we hold is still the one on screen. */
+   if (screen->scanout.buffer != VK_NULL_HANDLE &&
+       screen->scanout.bits == target->bits &&
+       screen->scanout.row_pitch == bytes_per_row)
+      return true;
+
+   simple_mtx_lock(&screen->scanout.represent_lock);
+   const bool ok = acquire_scanout_locked(screen, target);
+   simple_mtx_unlock(&screen->scanout.represent_lock);
+   return ok;
+}
+
+static bool
+acquire_scanout_locked(struct zink_screen *screen,
+                       const struct hgl_scanout_target *target)
 {
    const uint32_t bytes_per_row = target->bytes_per_row;
 

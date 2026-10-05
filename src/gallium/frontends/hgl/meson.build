@@ -13,5 +13,6 @@ libsthgl = static_library(
     inc_include, inc_util, inc_mesa, inc_src,
     inc_gallium, inc_gallium_aux
   ],
+  dependencies : idep_mesautilformat,
   gnu_symbol_visibility : 'hidden',
 )

@@ -254,6 +254,16 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
          struct zink_gfx_output_key *okey = DYNAMIC_STATE >= ZINK_DYNAMIC_STATE3 && screen->have_full_ds3 ?
                                              zink_find_or_create_output_ds3(ctx) :
                                              zink_find_or_create_output(ctx);
+         /* A part that failed to build (out of memory, say) is VK_NULL_HANDLE:
+          * linking it makes the driver read through a null pipeline (Summit
+          * saw NVK crash in vk_graphics_pipeline_state_merge). Build the
+          * whole pipeline instead. */
+         if (!gkey || !gkey->pipeline || (ikey && !ikey->pipeline) || !okey || !okey->pipeline) {
+            if (DYNAMIC_STATE != ZINK_DYNAMIC_VERTEX_INPUT2 && DYNAMIC_STATE != ZINK_DYNAMIC_VERTEX_INPUT && !IS_MESH)
+               pc_entry->pipeline = zink_create_gfx_pipeline(screen, prog, prog->objs, state, state->element_state->binding_map, vkmode, false);
+            else
+               pc_entry->pipeline = zink_create_gfx_pipeline(screen, prog, prog->objs, state, NULL, vkmode, false);
+         } else {
          /* partial pipelines are stored to the cache entry for async optimized pipeline compiles */
          pc_entry->gpl.ikey = ikey;
          pc_entry->gpl.gkey = gkey;
@@ -267,6 +277,7 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
             if (!prog->is_separable)
                /* trigger async optimized pipeline compile if this was the fast-linked unoptimized pipeline */
                zink_gfx_program_compile_queue(ctx, pc_entry);
+         }
          }
       } else {
          /* optimize by default only when expecting precompiles in order to reduce stuttering */

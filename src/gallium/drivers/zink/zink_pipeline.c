@@ -904,6 +904,13 @@ zink_create_gfx_pipeline_combined(struct zink_screen *screen, struct zink_gfx_pr
    VkPipeline libraries[4];
    VkPipelineLibraryCreateInfoKHR libstate = {0};
    libstate.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+   /* Never link a library that failed to build: drivers dereference it. */
+   for (unsigned i = 0; i < libcount; i++) {
+      if (library[i] == VK_NULL_HANDLE) {
+         mesa_loge("ZINK: a pipeline library is missing; not linking");
+         return VK_NULL_HANDLE;
+      }
+   }
    if (input)
       libraries[libstate.libraryCount++] = input;
    for (unsigned i = 0; i < libcount; i++)

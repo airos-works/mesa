@@ -478,7 +478,17 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    {
       struct sw_winsys *winsys = hgl_create_sw_winsys();
       if (winsys) {
-         screen = sw_screen_create(winsys);
+#ifdef GALLIUM_ZINK
+         /* A discrete GPU is only reachable through Vulkan on Haiku: it has no
+          * Gallium kernel driver, but it does have a Vulkan one (NVK on
+          * NVIDIA). Zink turns GL and GLES into Vulkan calls; the software
+          * rasterisers below stay the fallback. */
+         if (!disp->Options.ForceSoftware
+             && !debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false))
+            screen = sw_screen_create_zink(winsys, NULL, false);
+#endif
+         if (!screen)
+            screen = sw_screen_create(winsys);
          if (!screen)
             winsys->destroy(winsys);
       }

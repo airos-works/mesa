@@ -8,6 +8,6 @@ libswhgl = static_library(
   include_directories : [inc_gallium, inc_include, inc_src, inc_gallium_aux,
     include_directories('../../../frontends/hgl')
   ],
-  dependencies: idep_mesautil,
+  dependencies: [idep_mesautil, idep_mesautilformat],
   build_by_default : false,
 )

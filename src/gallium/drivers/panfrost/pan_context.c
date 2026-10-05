@@ -29,6 +29,7 @@
 #include <poll.h>
 
 #include "pan_bo.h"
+#include "indices/u_primconvert.h"
 #include "pan_context.h"
 #ifdef __HAIKU__
 #include "pan_sw_polygon.h"
@@ -546,6 +547,9 @@ panfrost_destroy(struct pipe_context *pipe)
 #ifdef __HAIKU__
    panfrost_sw_polygon_destroy(panfrost);
 #endif
+
+   if (panfrost->primconvert)
+      util_primconvert_destroy(panfrost->primconvert);
 
    pan_screen(pipe->screen)->vtbl.context_cleanup(panfrost);
 

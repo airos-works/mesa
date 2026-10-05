@@ -243,6 +243,8 @@ struct panfrost_context {
    bool haiku_sync_failed;
    struct panfrost_sw_polygon *sw_polygon;
    bool sw_polygon_active;
+   /* Rewrites legacy fill-mode topologies into triangles on the GPU path. */
+   struct primconvert_context *primconvert;
 #endif
 
    union {

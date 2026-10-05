@@ -33,6 +33,7 @@
 #include "util/u_helpers.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
+#include "indices/u_primconvert.h"
 #include "util/u_sample_positions.h"
 #include "util/u_vbuf.h"
 #include "util/u_viewport.h"
@@ -3480,15 +3481,42 @@ panfrost_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
 
 #ifdef __HAIKU__
    if (!ctx->sw_polygon_active && panfrost_sw_polygon_enabled() &&
-       u_reduced_prim(info->mode) == MESA_PRIM_TRIANGLES &&
-       (panfrost_sw_polygon_legacy_topology(info->mode) ||
-        ctx->rasterizer->base.fill_front != PIPE_POLYGON_MODE_FILL ||
-        ctx->rasterizer->base.fill_back != PIPE_POLYGON_MODE_FILL)) {
-      if (!panfrost_sw_polygon_draw(ctx, &ctx->rasterizer->base,
-                                   ctx->vertex->num_elements, ctx->vertex->pipe,
-                                   info, drawid_offset, indirect, draws, num_draws))
-         fprintf(stderr, "Panfrost: experimental polygon geometry path failed\n");
-      return;
+       u_reduced_prim(info->mode) == MESA_PRIM_TRIANGLES) {
+      bool unfilled = ctx->rasterizer->base.fill_front != PIPE_POLYGON_MODE_FILL ||
+                      ctx->rasterizer->base.fill_back != PIPE_POLYGON_MODE_FILL;
+      if (unfilled) {
+         /* Only polygon line/point mode needs the original polygon boundaries:
+          * triangulating first loses the internal-edge distinction. That case
+          * keeps the CPU geometry path. */
+         if (!panfrost_sw_polygon_draw(ctx, &ctx->rasterizer->base,
+                                      ctx->vertex->num_elements, ctx->vertex->pipe,
+                                      info, drawid_offset, indirect, draws, num_draws))
+            fprintf(stderr, "Panfrost: experimental polygon geometry path failed\n");
+         return;
+      }
+      if (panfrost_sw_polygon_legacy_topology(info->mode)) {
+         /* Filled quads, quad strips and polygons are exactly triangles once
+          * the topology is rewritten, so the GPU keeps doing the vertex work:
+          * only the index list is built on the CPU. */
+         if (!ctx->primconvert) {
+            uint32_t native = pipe->screen->caps.supported_prim_modes &
+                              ~(BITFIELD_BIT(MESA_PRIM_QUADS) |
+                                BITFIELD_BIT(MESA_PRIM_QUAD_STRIP) |
+                                BITFIELD_BIT(MESA_PRIM_POLYGON));
+            ctx->primconvert = util_primconvert_create(pipe, native);
+            if (!ctx->primconvert) {
+               fprintf(stderr, "Panfrost: primitive conversion unavailable\n");
+               return;
+            }
+         }
+         util_primconvert_save_rasterizer_state(ctx->primconvert,
+                                                &ctx->rasterizer->base);
+         util_primconvert_save_flatshade_first(ctx->primconvert,
+                                               ctx->rasterizer->base.flatshade_first);
+         util_primconvert_draw_vbo(ctx->primconvert, info, drawid_offset, indirect,
+                                   draws, num_draws);
+         return;
+      }
    }
 #endif
 

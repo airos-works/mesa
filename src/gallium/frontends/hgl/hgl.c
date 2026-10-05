@@ -124,6 +124,27 @@ hgl_st_framebuffer_validate_textures(struct pipe_frontend_drawable *drawable,
 				case ST_ATTACHMENT_DEPTH_STENCIL:
 					format = buffer->visual.depth_stencil_format;
 					bind = PIPE_BIND_DEPTH_STENCIL;
+					if (format != PIPE_FORMAT_NONE
+						&& !buffer->screen->is_format_supported(buffer->screen,
+							format, buffer->target, 0, 0, bind)) {
+						// Not every driver has the visual's layout of depth
+						// and stencil (V3D only has the other byte order).
+						static const enum pipe_format kFormats[] = {
+							PIPE_FORMAT_S8_UINT_Z24_UNORM,
+							PIPE_FORMAT_Z24_UNORM_S8_UINT,
+							PIPE_FORMAT_X8Z24_UNORM,
+							PIPE_FORMAT_Z24X8_UNORM,
+							PIPE_FORMAT_Z16_UNORM
+						};
+						for (unsigned k = 0; k < ARRAY_SIZE(kFormats); k++) {
+							if (buffer->screen->is_format_supported(
+									buffer->screen, kFormats[k], buffer->target,
+									0, 0, bind)) {
+								format = kFormats[k];
+								break;
+							}
+						}
+					}
 					break;
 				default:
 					format = PIPE_FORMAT_NONE;

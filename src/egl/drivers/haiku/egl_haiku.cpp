@@ -55,6 +55,11 @@
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
+#ifdef GALLIUM_V3D
+extern "C" {
+#include "v3d/drm/v3d_drm_public.h"
+}
+#endif
 
 #include <Bitmap.h>
 
@@ -454,6 +459,19 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    disp->DriverData = (void *)hgl_dpy;
 
    struct pipe_screen *screen = NULL;
+#ifdef GALLIUM_V3D
+   /* Raspberry Pi: the V3D render device whenever its driver published it.
+    * HAIKU_V3D_DEVICE names another one; LIBGL_ALWAYS_SOFTWARE skips it. */
+   if (!disp->Options.ForceSoftware) {
+      const char *v3d_device = getenv("HAIKU_V3D_DEVICE");
+      if (v3d_device == NULL || *v3d_device == '\0')
+         v3d_device = "/dev/graphics/v3d/0";
+      if (access(v3d_device, R_OK | W_OK) == 0)
+         screen = v3d_haiku_screen_create(v3d_device);
+      if (screen != NULL)
+         hgl_dpy->native_csf = true;
+   }
+#endif
 #ifdef GALLIUM_PANFROST
    const char *device = getenv("HAIKU_CSF_DEVICE");
    bool explicit_device = device != NULL && *device != '\0';
@@ -462,7 +480,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
       /* System default: the Mali CSF device whenever the driver published it. */
       device = kHaikuDefaultCsfDevice;
    }
-   if (device != NULL && *device != '\0') {
+   if (screen == NULL && device != NULL && *device != '\0') {
       hgl_dpy->native_csf = true;
       /* An explicit native device must never become a software fallback. */
       if (!disp->Options.ForceSoftware)
@@ -475,7 +493,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    }
    if (device == NULL || *device == '\0')
 #endif
-   {
+   if (screen == NULL) {
       struct sw_winsys *winsys = hgl_create_sw_winsys();
       if (winsys) {
          screen = sw_screen_create(winsys);

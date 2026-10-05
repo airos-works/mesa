@@ -22,7 +22,11 @@
  * IN THE SOFTWARE.
  */
 
+#ifdef __HAIKU__
+#include <OS.h>
+#else
 #include <sys/sysinfo.h>
+#endif
 
 #include "common/v3d_device_info.h"
 #include "common/v3d_limits.h"
@@ -218,10 +222,17 @@ v3d_init_compute_caps(struct v3d_screen *screen)
         /* GL_MAX_COMPUTE_SHARED_MEMORY_SIZE */
         caps->max_local_size = 32768;
 
+#ifdef __HAIKU__
+        system_info si;
+        get_system_info(&si);
+        uint64_t totalram = (uint64_t)si.max_pages * B_PAGE_SIZE;
+#else
         struct sysinfo si;
         sysinfo(&si);
-        caps->max_global_size = si.totalram;
-        caps->max_mem_alloc_size = MIN2(V3D_MAX_BUFFER_RANGE, si.totalram);
+        uint64_t totalram = si.totalram;
+#endif
+        caps->max_global_size = totalram;
+        caps->max_mem_alloc_size = MIN2(V3D_MAX_BUFFER_RANGE, totalram);
 
         caps->max_compute_units = 1;
         caps->subgroup_sizes = 16;
@@ -787,6 +798,10 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
 
         list_inithead(&screen->bo_cache.time_list);
         (void)mtx_init(&screen->bo_handles_mutex, mtx_plain);
+        /* Not every libc's zeroed mutex is an initialized one (Haiku's
+         * asserts on it).
+         */
+        (void)mtx_init(&screen->bo_cache.lock, mtx_plain);
         screen->bo_handles = util_hash_table_create_ptr_keys();
 
 #if USE_V3D_SIMULATOR

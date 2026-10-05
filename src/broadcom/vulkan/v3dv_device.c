@@ -26,10 +26,19 @@
 #include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
+#ifdef __HAIKU__
+#include <OS.h>
+/* device files have no major and minor numbers */
+#define major(devid) 0
+#define minor(devid) 0
+#else
 #include <sys/sysinfo.h>
+#endif
 #include <unistd.h>
 #include <xf86drm.h>
+#ifndef __HAIKU__
 #include <xf86drmMode.h>
+#endif
 
 #ifdef MAJOR_IN_MKDEV
 #include <sys/mkdev.h>
@@ -689,10 +698,17 @@ compute_heap_size()
 {
 #if !USE_V3D_SIMULATOR
    /* Query the total ram from the system */
+#ifdef __HAIKU__
+   system_info info;
+   get_system_info(&info);
+
+   uint64_t total_ram = (uint64_t)info.max_pages * B_PAGE_SIZE;
+#else
    struct sysinfo info;
    sysinfo(&info);
 
    uint64_t total_ram = (uint64_t)info.totalram * (uint64_t)info.mem_unit;
+#endif
 #else
    uint64_t total_ram = (uint64_t) v3d_simulator_get_mem_size();
 #endif
@@ -756,6 +772,16 @@ device_has_expected_features(struct v3dv_physical_device *device)
 static VkResult
 init_uuids(struct v3dv_physical_device *device)
 {
+#ifdef __HAIKU__
+   /* No build-id note in the binary: what identifies the build is the
+    * version and the moment it was compiled.
+    */
+   static const char haiku_build[] = PACKAGE_VERSION " " __DATE__ " " __TIME__;
+   uint8_t haiku_build_sha1[20];
+   _mesa_sha1_compute(haiku_build, sizeof(haiku_build), haiku_build_sha1);
+#define build_id_data(note) haiku_build_sha1
+   unsigned build_id_len = 20;
+#else
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(init_uuids);
    if (!note) {
@@ -770,6 +796,7 @@ init_uuids(struct v3dv_physical_device *device)
                        VK_ERROR_INITIALIZATION_FAILED,
                        "build-id too short.  It needs to be a SHA");
    }
+#endif
 
    memcpy(device->driver_build_sha1, build_id_data(note), 20);
 
@@ -1419,6 +1446,7 @@ fail:
    return result;
 }
 
+#ifndef __HAIKU__
 static bool
 try_device(const char *path, int *fd, const char *target)
 {
@@ -1527,11 +1555,32 @@ fail:
  * compatible device is found, it may return an error code if device
  * initialization failed.
  */
+#endif /* !__HAIKU__ */
+
 static VkResult
 enumerate_devices(struct vk_instance *vk_instance)
 {
    struct v3dv_instance *instance =
       container_of(vk_instance, struct v3dv_instance, vk);
+
+#ifdef __HAIKU__
+   /* One render device and no DRM device list to look through; there is no
+    * display device to allocate window system buffers on.
+    */
+   const char *path = getenv("HAIKU_V3D_DEVICE");
+   if (path == NULL)
+      path = "/dev/graphics/v3d/0";
+   int32_t haiku_render_fd = open(path, O_RDWR | O_CLOEXEC);
+   if (haiku_render_fd < 0)
+      return VK_SUCCESS;
+   int32_t haiku_primary_fd = dup(haiku_render_fd);
+   if (haiku_primary_fd < 0) {
+      close(haiku_render_fd);
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+   }
+   return create_physical_device(instance, haiku_primary_fd,
+                                 haiku_render_fd, -1);
+#else
 
    /* FIXME: Check for more devices? */
    drmDevicePtr devices[8];
@@ -1590,6 +1639,7 @@ enumerate_devices(struct vk_instance *vk_instance)
    drmFreeDevices(devices, max_devices);
 
    return result;
+#endif /* !__HAIKU__ */
 }
 
 uint32_t

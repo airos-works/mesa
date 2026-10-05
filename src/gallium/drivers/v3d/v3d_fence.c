@@ -59,7 +59,10 @@ v3d_fence_reference(struct pipe_screen *pscreen,
 
         if (pipe_reference(old ? &old->reference : NULL,
                            f ? &f->reference : NULL)) {
+#ifndef __HAIKU__
+                /* On Haiku the "fd" is a job token, not a descriptor. */
                 close(old->fd);
+#endif
                 free(old);
         }
         *p = f;
@@ -85,6 +88,15 @@ v3d_fence_wait(struct v3d_screen *screen,
         unsigned syncobj;
 
         MESA_TRACE_FUNC();
+
+#ifdef __HAIKU__
+        (void)syncobj;
+        ret = haiku_v3d_wait_token(screen->fd, fence->fd,
+                                   timeout_ns == OS_TIMEOUT_INFINITE
+                                   ? -1 : (int64_t)MIN2(timeout_ns,
+                                                        (uint64_t)INT64_MAX));
+        return ret == 0;
+#endif
 
         ret = drmSyncobjCreate(screen->fd, 0, &syncobj);
         if (ret) {

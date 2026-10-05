@@ -26,7 +26,11 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <xf86drm.h>
+#ifdef __HAIKU__
+#include <OS.h>
+#else
 #include <xf86drmMode.h>
+#endif
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_hash_table.h"
@@ -207,7 +211,12 @@ v3d_bo_free(struct v3d_bo *bo)
                 } else
 #endif
                 {
+#ifdef __HAIKU__
+                        /* the driver's clone of the buffer in this team */
+                        delete_area(area_for(bo->map));
+#else
                         munmap(bo->map, bo->size);
+#endif
                         VG(VALGRIND_FREELIKE_BLOCK(bo->map, 0));
                 }
         }
@@ -472,6 +481,13 @@ static int v3d_wait_bo_ioctl(int fd, uint32_t handle, uint64_t timeout_ns)
                 .timeout_ns = timeout_ns,
         };
         int ret = v3d_ioctl(fd, DRM_IOCTL_V3D_WAIT_BO, &wait);
+#ifdef __HAIKU__
+        /* Haiku's error codes are negative already, and its timeout is not
+         * ETIME.
+         */
+        if (ret == -1)
+                return errno == B_TIMED_OUT ? -ETIME : -abs(errno);
+#endif
         if (ret == -1)
                 return -errno;
         else
@@ -525,9 +541,15 @@ v3d_bo_map_unsynchronized(struct v3d_bo *bo)
                 abort();
         }
 
+#ifdef __HAIKU__
+        /* The driver has mapped the buffer; "offset" is the address. */
+        bo->map = (void *)(uintptr_t)offset;
+        if (bo->map == NULL) {
+#else
         bo->map = mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                        bo->screen->fd, offset);
         if (bo->map == MAP_FAILED) {
+#endif
                 fprintf(stderr, "mmap of bo %d (offset 0x%016llx, size %d) failed\n",
                         bo->handle, (long long)offset, bo->size);
                 abort();

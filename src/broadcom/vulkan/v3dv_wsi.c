@@ -40,6 +40,10 @@ static bool
 v3dv_wsi_can_present_on_device(VkPhysicalDevice _pdevice, int fd)
 {
    V3DV_FROM_HANDLE(v3dv_physical_device, pdevice, _pdevice);
+#ifdef __HAIKU__
+   /* no DRM display device to present on */
+   return false;
+#endif
    assert(pdevice->display_fd != -1);
    assert(pdevice->render_fd != -1);
 

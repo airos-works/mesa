@@ -385,7 +385,9 @@ v3dv_update_image_layout(struct v3dv_device *device,
 
    image->tiled = modifier != DRM_FORMAT_MOD_LINEAR;
 
+#if DETECT_OS_LINUX || DETECT_OS_BSD
    image->vk.drm_format_mod = modifier;
+#endif
 
    return v3d_setup_slices(image, disjoint,
                            explicit_mod_info ? explicit_mod_info->pPlaneLayouts :

@@ -45,3 +45,59 @@ v3d_drm_screen_create_renderonly(int fd, struct renderonly *ro,
    return u_pipe_screen_lookup_or_create(fd, config,
                                          ro, v3d_screen_create);
 }
+
+#ifdef __HAIKU__
+#include "renderonly/renderonly.h"
+#include "util/driconf.h"
+#include "util/xmlconfig.h"
+#include "util/macros.h"
+
+static const driOptionDescription haiku_v3d_options[] = {
+#include "v3d/driinfo_v3d.h"
+};
+
+struct pipe_screen *
+v3d_haiku_screen_create(const char *device)
+{
+   int fd = open(device, O_RDWR | O_CLOEXEC);
+   if (fd < 0)
+      return NULL;
+
+   driOptionCache info = {0}, options = {0};
+   driParseOptionInfo(&info, haiku_v3d_options, ARRAY_SIZE(haiku_v3d_options));
+   const struct pipe_screen_config config = {
+      .options = &options,
+      .options_info = &info,
+   };
+   /* Not through the screen cache: its key is the device's inode, and the
+    * screen owns this descriptor. */
+   struct pipe_screen *screen = v3d_screen_create(fd, &config, NULL);
+   if (screen == NULL)
+      close(fd);
+   driDestroyOptionCache(&options);
+   driDestroyOptionInfo(&info);
+   return screen;
+}
+
+/* There is no KMS device to scan out through; v3d only reaches these with a
+ * renderonly object, which the Haiku screen never has. The auxiliary
+ * library that implements them is not built without DRM. */
+void
+renderonly_scanout_destroy(struct renderonly_scanout *scanout,
+                           struct renderonly *ro)
+{
+   (void)scanout;
+   (void)ro;
+}
+
+struct renderonly_scanout *
+renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc,
+                                          struct renderonly *ro,
+                                          struct winsys_handle *out_handle)
+{
+   (void)rsc;
+   (void)ro;
+   (void)out_handle;
+   return NULL;
+}
+#endif

@@ -37,7 +37,8 @@ struct util_sync_provider {
    struct util_sync_provider * (*clone)(struct util_sync_provider *p);
 };
 
-#if HAVE_LIBDRM
+#if HAVE_LIBDRM || defined(__HAIKU__)
+/* On Haiku: the V3D render device's sync objects (u_sync_provider_haiku.c) */
 struct util_sync_provider * util_sync_provider_drm(int drm_fd);
 #else
 static inline struct util_sync_provider *

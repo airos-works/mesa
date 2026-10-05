@@ -284,6 +284,8 @@ deps_for_libmesa_util = [
 if dep_libdrm.found()
   files_mesa_util += files('u_sync_provider.c', 'u_sync_provider.h')
   deps_for_libmesa_util += dep_libdrm
+elif host_machine.system() == 'haiku'
+  files_mesa_util += files('u_sync_provider_haiku.c', 'u_sync_provider.h')
 endif
 
 if with_platform_android

@@ -33,4 +33,9 @@ struct pipe_screen *v3d_drm_screen_create(int drmFD,
 struct pipe_screen *v3d_drm_screen_create_renderonly(int fd, struct renderonly *ro,
                                                      const struct pipe_screen_config *config);
 
+#ifdef __HAIKU__
+/* Opens the V3D render device of air/OS and creates the screen on it. */
+struct pipe_screen *v3d_haiku_screen_create(const char *device);
+#endif
+
 #endif /* __V3D_DRM_PUBLIC_H__ */

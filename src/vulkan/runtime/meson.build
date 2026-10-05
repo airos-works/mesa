@@ -57,6 +57,9 @@ vulkan_lite_runtime_deps = [
 if dep_libdrm.found()
   vulkan_lite_runtime_files += files('vk_drm_syncobj.c')
   vulkan_lite_runtime_deps += dep_libdrm
+elif host_machine.system() == 'haiku'
+  # on the sync provider of Haiku's V3D render device
+  vulkan_lite_runtime_files += files('vk_drm_syncobj.c')
 endif
 
 if with_platform_android

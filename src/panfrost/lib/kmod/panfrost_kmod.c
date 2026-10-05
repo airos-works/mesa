@@ -43,13 +43,13 @@ struct panfrost_kmod_bo {
 };
 
 static struct pan_kmod_dev *
-panfrost_kmod_dev_create(int fd, uint32_t flags, drmVersionPtr version,
+panfrost_kmod_dev_create(int fd, uint32_t flags, const struct pan_kmod_version *version,
                          const struct pan_kmod_allocator *allocator)
 {
-   if (version->version_major < 1 ||
-       (version->version_major == 1 && version->version_minor < 1)) {
+   if (version->major < 1 ||
+       (version->major == 1 && version->minor < 1)) {
       mesa_loge("kernel driver is too old (requires at least 1.1, found %d.%d)",
-                version->version_major, version->version_minor);
+                version->major, version->minor);
       return NULL;
    }
 

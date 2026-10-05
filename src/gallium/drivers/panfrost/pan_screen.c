@@ -53,6 +53,9 @@
 #include "pan_public.h"
 #include "pan_resource.h"
 #include "pan_screen.h"
+#ifdef __HAIKU__
+#include "pan_sw_polygon.h"
+#endif
 #include "pan_shader.h"
 #include "pan_util.h"
 
@@ -882,12 +885,26 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
       modes &= ~BITFIELD_BIT(MESA_PRIM_QUADS);
    }
 
+#ifdef __HAIKU__
+   /* The opt-in CPU geometry path accepts original polygon boundaries.
+    * Frontend triangulation loses the internal-edge distinction in line mode.
+    * All draws in these modes are routed through that path, including fill. */
+   if (panfrost_sw_polygon_enabled())
+      modes |= BITFIELD_BIT(MESA_PRIM_QUADS) |
+               BITFIELD_BIT(MESA_PRIM_QUAD_STRIP) |
+               BITFIELD_BIT(MESA_PRIM_POLYGON);
+#endif
+
    caps->supported_prim_modes =
    caps->supported_prim_modes_with_restart = modes;
 
    caps->image_store_formatted = true;
 
+   #ifdef __HAIKU__
+   caps->native_fence_fd = false;
+#else
    caps->native_fence_fd = true;
+#endif
 
    caps->context_priority_mask =
       from_kmod_group_allow_priority_flags(
@@ -998,8 +1015,10 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
    /* Create the screen */
    struct panfrost_screen *screen = rzalloc(NULL, struct panfrost_screen);
 
-   if (!screen)
+   if (!screen) {
+      close(fd);
       return NULL;
+   }
 
    struct panfrost_device *dev = pan_device(&screen->base);
 

@@ -24,7 +24,9 @@ endif
 
 if with_gallium_panfrost or with_panfrost_vk
    subdir('libpan')
-   subdir('perf')
+   if not with_platform_haiku
+      subdir('perf')
+   endif
 endif
 
 files_bifrost = files(

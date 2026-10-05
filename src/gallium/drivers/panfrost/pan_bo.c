@@ -27,7 +27,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <xf86drm.h>
+#include "kmod/pan_sync.h"
 
 #include "pan_bo.h"
 #include "pan_device.h"
@@ -363,7 +363,7 @@ panfrost_bo_munmap(struct panfrost_bo *bo)
    if (!bo->ptr.cpu)
       return;
 
-   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
+   if (pan_kmod_bo_munmap(bo->kmod_bo, (void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
       mesa_loge("munmap failed: %s", strerror(errno));
       abort();
    }
@@ -490,6 +490,9 @@ panfrost_bo_unreference(struct panfrost_bo *bo)
 struct panfrost_bo *
 panfrost_bo_import(struct panfrost_device *dev, int fd)
 {
+#ifdef __HAIKU__
+   (void)dev; (void)fd; errno = ENOTSUP; return NULL;
+#else
    struct panfrost_bo *bo;
    ASSERTED int ret;
    unsigned gem_handle;
@@ -548,6 +551,7 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
    pthread_mutex_unlock(&dev->bo_map_lock);
 
    return bo;
+#endif
 }
 
 int

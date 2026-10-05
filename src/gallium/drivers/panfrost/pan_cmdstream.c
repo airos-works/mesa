@@ -48,6 +48,9 @@
 #include "pan_bo.h"
 #include "pan_cmdstream.h"
 #include "pan_context.h"
+#ifdef __HAIKU__
+#include "pan_sw_polygon.h"
+#endif
 #include "pan_csf.h"
 #include "pan_fb_preload.h"
 #include "pan_format.h"
@@ -3474,6 +3477,20 @@ panfrost_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
 
    if (!panfrost_render_condition_check(ctx))
       return;
+
+#ifdef __HAIKU__
+   if (!ctx->sw_polygon_active && panfrost_sw_polygon_enabled() &&
+       u_reduced_prim(info->mode) == MESA_PRIM_TRIANGLES &&
+       (panfrost_sw_polygon_legacy_topology(info->mode) ||
+        ctx->rasterizer->base.fill_front != PIPE_POLYGON_MODE_FILL ||
+        ctx->rasterizer->base.fill_back != PIPE_POLYGON_MODE_FILL)) {
+      if (!panfrost_sw_polygon_draw(ctx, &ctx->rasterizer->base,
+                                   ctx->vertex->num_elements, ctx->vertex->pipe,
+                                   info, drawid_offset, indirect, draws, num_draws))
+         fprintf(stderr, "Panfrost: experimental polygon geometry path failed\n");
+      return;
+   }
+#endif
 
    ctx->draw_calls++;
 

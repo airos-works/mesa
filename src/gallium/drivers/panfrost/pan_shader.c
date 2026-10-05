@@ -38,6 +38,9 @@
 #include "nir_serialize.h"
 #include "pan_bo.h"
 #include "pan_context.h"
+#ifdef __HAIKU__
+#include "pan_sw_polygon.h"
+#endif
 #include "shader_enums.h"
 
 static struct panfrost_uncompiled_shader *
@@ -497,6 +500,10 @@ panfrost_create_shader_state(struct pipe_context *pctx,
 
    so->stream_output = cso->stream_output;
    so->nir = nir;
+#ifdef __HAIKU__
+   if (panfrost_sw_polygon_enabled() && !pan_context(pctx)->sw_polygon_active)
+      so->sw_polygon_nir = nir_shader_clone(so, nir);
+#endif
 
    /* gl_FragColor needs to be lowered before lowering I/O, do that now */
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&

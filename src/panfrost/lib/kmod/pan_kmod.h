@@ -19,7 +19,10 @@
 
 #include <fcntl.h>
 #include <unistd.h>
-#include <xf86drm.h>
+#include "pan_sync.h"
+#ifdef __HAIKU__
+#include "haiku_kmod.h"
+#endif
 
 #include "drm-uapi/drm.h"
 
@@ -40,6 +43,7 @@ extern "C" {
 #endif
 
 struct pan_kmod_dev;
+struct pan_kmod_version { uint32_t major, minor; };
 
 /* GPU VM creation flags. */
 enum pan_kmod_vm_flags {
@@ -363,7 +367,7 @@ struct pan_kmod_ops {
     * Return NULL if the creation fails for any reason.
     */
    struct pan_kmod_dev *(*dev_create)(
-      int fd, uint32_t flags, const drmVersionPtr version,
+      int fd, uint32_t flags, const struct pan_kmod_version *version,
       const struct pan_kmod_allocator *allocator);
 
    /* Destroy a pan_kmod_dev object. */
@@ -487,11 +491,19 @@ struct pan_kmod_dev {
    void *user_priv;
 };
 
+#ifdef __HAIKU__
+/* Older JM paths are not supported by the native CSF device. */
+static inline int pan_kmod_unsupported_ioctl(int fd, unsigned long op, void *arg)
+{ (void)fd; (void)op; (void)arg; errno = ENOTSUP; return -1; }
+#define pan_kmod_ioctl(fd, op, arg) pan_kmod_unsupported_ioctl(fd, op, arg)
+#else
 #define pan_kmod_ioctl(fd, op, arg)                                          \
    ({                                                                        \
       MESA_TRACE_SCOPE("pan_kmod_ioctl op=" #op);                            \
       drmIoctl(fd, op, arg);                                                 \
    })
+
+#endif
 
 struct pan_kmod_dev *
 pan_kmod_dev_create(int fd, uint32_t flags,
@@ -579,6 +591,9 @@ struct pan_kmod_bo *pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd,
 static inline int
 pan_kmod_bo_export(struct pan_kmod_bo *bo)
 {
+#ifdef __HAIKU__
+   (void)bo; errno = ENOTSUP; return -1;
+#else
    int fd;
 
    if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
@@ -594,6 +609,7 @@ pan_kmod_bo_export(struct pan_kmod_bo *bo)
 
    bo->flags |= PAN_KMOD_BO_FLAG_EXPORTED;
    return fd;
+#endif
 }
 
 static inline bool
@@ -623,6 +639,9 @@ static inline void *
 pan_kmod_bo_mmap(struct pan_kmod_bo *bo, off_t bo_offset, size_t size, int prot,
                  int flags, void *host_addr)
 {
+#ifdef __HAIKU__
+   return haiku_kmod_bo_mmap(bo, bo_offset, size, prot, flags, host_addr);
+#else
    off_t mmap_offset;
 
    if ((uint64_t)bo_offset + (uint64_t)size > bo->size)
@@ -639,6 +658,18 @@ pan_kmod_bo_mmap(struct pan_kmod_bo *bo, off_t bo_offset, size_t size, int prot,
                 size, prot, flags, strerror(errno));
 
    return host_addr;
+#endif
+}
+
+static inline int
+pan_kmod_bo_munmap(struct pan_kmod_bo *bo, void *address, size_t size)
+{
+#ifdef __HAIKU__
+   return haiku_kmod_bo_munmap(bo, address, size);
+#else
+   (void)bo;
+   return os_munmap(address, size);
+#endif
 }
 
 static inline void
@@ -698,7 +729,7 @@ pan_kmod_vm_handle(struct pan_kmod_vm *vm)
 static inline uint64_t
 pan_kmod_query_timestamp(const struct pan_kmod_dev *dev)
 {
-   return dev->ops->query_timestamp(dev);
+   return dev->ops->query_timestamp ? dev->ops->query_timestamp(dev) : 0;
 }
 
 #if defined(__cplusplus)

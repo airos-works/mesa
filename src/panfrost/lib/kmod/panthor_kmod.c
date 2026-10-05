@@ -104,7 +104,7 @@ struct panthor_kmod_bo {
 };
 
 static struct pan_kmod_dev *
-panthor_kmod_dev_create(int fd, uint32_t flags, drmVersionPtr version,
+panthor_kmod_dev_create(int fd, uint32_t flags, const struct pan_kmod_version *version,
                         const struct pan_kmod_allocator *allocator)
 {
    struct panthor_kmod_dev *panthor_dev =
@@ -139,7 +139,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags, drmVersionPtr version,
       goto err_free_dev;
    }
 
-   if (version->version_major > 1 || version->version_minor >= 1) {
+   if (version->major > 1 || version->minor >= 1) {
       query = (struct drm_panthor_dev_query){
          .type = DRM_PANTHOR_DEV_QUERY_TIMESTAMP_INFO,
          .size = sizeof(panthor_dev->props.timestamp),
@@ -154,7 +154,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags, drmVersionPtr version,
    }
 
    /* Map the LATEST_FLUSH_ID register at device creation time. */
-   if (version->version_major > 1 || version->version_minor >= 10) {
+   if (version->major > 1 || version->minor >= 10) {
       struct drm_panthor_set_user_mmio_offset user_mmio_offset = {
          .offset = DRM_PANTHOR_USER_MMIO_OFFSET,
       };
@@ -173,7 +173,7 @@ panthor_kmod_dev_create(int fd, uint32_t flags, drmVersionPtr version,
       goto err_free_dev;
    }
 
-   if (version->version_major > 1 || version->version_minor >= 2) {
+   if (version->major > 1 || version->minor >= 2) {
       query = (struct drm_panthor_dev_query){
          .type = DRM_PANTHOR_DEV_QUERY_GROUP_PRIORITIES_INFO,
          .size = sizeof(panthor_dev->props.group_priorities),

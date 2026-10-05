@@ -32,6 +32,8 @@ struct pipe_screen;
 struct pipe_screen_config;
 struct renderonly;
 
+struct pipe_screen *panfrost_haiku_screen_create(const char *device);
+
 struct pipe_screen *
 panfrost_create_screen(int fd, const struct pipe_screen_config *config,
                        struct renderonly *ro);

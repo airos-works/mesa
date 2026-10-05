@@ -1,3 +1,6 @@
+if with_platform_haiku
+  libpanfrostwinsys = []
+else
 # Copyright © 2017 Broadcom
 # SPDX-License-Identifier: MIT
 
@@ -11,3 +14,5 @@ libpanfrostwinsys = static_library(
   gnu_symbol_visibility : 'hidden',
   dependencies: [dep_libdrm, idep_mesautil],
 )
+
+endif

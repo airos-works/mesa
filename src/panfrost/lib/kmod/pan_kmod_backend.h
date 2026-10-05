@@ -12,14 +12,14 @@
 
 static inline void
 pan_kmod_dev_init(struct pan_kmod_dev *dev, int fd, uint32_t flags,
-                  drmVersionPtr version, const struct pan_kmod_ops *ops,
+                  const struct pan_kmod_version *version, const struct pan_kmod_ops *ops,
                   const struct pan_kmod_allocator *allocator)
 {
    simple_mtx_init(&dev->handle_to_bo.lock, mtx_plain);
    util_sparse_array_init(&dev->handle_to_bo.array,
                           sizeof(struct pan_kmod_bo *), 512);
-   dev->driver.version.major = version->version_major;
-   dev->driver.version.minor = version->version_minor;
+   dev->driver.version.major = version ? version->major : 0;
+   dev->driver.version.minor = version ? version->minor : 0;
    dev->fd = fd;
    dev->flags = flags;
    dev->ops = ops;

@@ -105,7 +105,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    submit.requirements = reqs;
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
+      ret = pan_sync_import_snapshot(panfrost_device_fd(dev), ctx->in_sync_obj,
                                      ctx->in_sync_fd);
       assert(!ret);
 
@@ -178,7 +178,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    /* Trace the job if we're doing that */
    if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
       /* Wait so we can get errors reported back */
-      ret = drmSyncobjWait(panfrost_device_fd(dev), &out_sync, 1, INT64_MAX,
+      ret = pan_sync_wait(panfrost_device_fd(dev), &out_sync, 1, INT64_MAX,
                            0, NULL);
       if (ret)
          return errno;

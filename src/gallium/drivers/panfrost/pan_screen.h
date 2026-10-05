@@ -29,7 +29,7 @@
 #ifndef PAN_SCREEN_H
 #define PAN_SCREEN_H
 
-#include <xf86drm.h>
+#include "kmod/pan_sync.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "renderonly/renderonly.h"

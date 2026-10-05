@@ -24,7 +24,7 @@
  *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
  */
 
-#include <xf86drm.h>
+#include "kmod/pan_sync.h"
 
 #include "drm-uapi/panfrost_drm.h"
 #include "util/hash_table.h"
@@ -97,6 +97,7 @@ panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev)
    dev->blendable_formats = pan_blendable_format_table(dev->arch);
 
    util_sparse_array_init(&dev->bo_map, sizeof(struct panfrost_bo), 512);
+   pthread_mutex_init(&dev->bo_map_lock, NULL);
 
    pthread_mutex_init(&dev->bo_cache.lock, NULL);
    list_inithead(&dev->bo_cache.lru);
@@ -162,6 +163,7 @@ panfrost_close_device(struct panfrost_device *dev)
       panfrost_bo_cache_evict_all(dev);
       pthread_mutex_destroy(&dev->bo_cache.lock);
       util_sparse_array_finish(&dev->bo_map);
+      pthread_mutex_destroy(&dev->bo_map_lock);
    }
 
    if (dev->kmod.vm)

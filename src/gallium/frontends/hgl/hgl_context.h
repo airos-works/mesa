@@ -55,6 +55,9 @@ struct hgl_buffer
 
 	struct pipe_screen* screen;
 	void* winsysContext;
+	void (*update_size)(struct hgl_buffer* buffer);
+	bool (*present)(struct pipe_context* pipe, struct hgl_buffer* buffer,
+		struct pipe_resource* texture);
 
 	enum pipe_texture_target target;
 	struct pipe_resource* textures[ST_ATTACHMENT_COUNT];
@@ -84,6 +87,10 @@ struct hgl_buffer* hgl_create_st_framebuffer(struct hgl_display *display, struct
 void hgl_destroy_st_framebuffer(struct hgl_buffer *buffer);
 
 struct hgl_context* hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct st_context* shared);
+struct st_context_attribs;
+struct hgl_context* hgl_create_context_attribs(struct hgl_display *display,
+	const struct st_context_attribs *attribs, struct st_context *shared,
+	enum st_context_error *error);
 void hgl_destroy_context(struct hgl_context* context);
 
 // hgl visual

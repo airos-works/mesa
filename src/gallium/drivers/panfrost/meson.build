@@ -27,6 +27,10 @@ files_panfrost = files(
   'pan_nir_lower_res_indices.c',
 )
 
+if with_platform_haiku
+  files_panfrost += files('pan_haiku.c', 'pan_sw_polygon.c')
+endif
+
 panfrost_includes = [
   inc_gallium,
   inc_gallium_aux,

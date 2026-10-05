@@ -42,7 +42,7 @@ panfrost_fence_reference(struct pipe_screen *pscreen,
    struct pipe_fence_handle *old = *ptr;
 
    if (pipe_reference(&old->reference, &fence->reference)) {
-      drmSyncobjDestroy(panfrost_device_fd(dev), old->syncobj);
+      pan_sync_destroy(panfrost_device_fd(dev), old->syncobj);
       free(old);
    }
 
@@ -63,8 +63,8 @@ panfrost_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
    if (abs_timeout == OS_TIMEOUT_INFINITE)
       abs_timeout = INT64_MAX;
 
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &fence->syncobj, 1,
-                        abs_timeout, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+   ret = pan_sync_wait(panfrost_device_fd(dev), &fence->syncobj, 1,
+                        abs_timeout, PAN_SYNC_WAIT_ALL, NULL);
 
    fence->signaled = (ret >= 0);
    return fence->signaled;
@@ -76,7 +76,7 @@ panfrost_fence_get_fd(struct pipe_screen *screen, struct pipe_fence_handle *f)
    struct panfrost_device *dev = pan_device(screen);
    int fd = -1;
 
-   drmSyncobjExportSyncFile(panfrost_device_fd(dev), f->syncobj, &fd);
+   pan_sync_export_snapshot(panfrost_device_fd(dev), f->syncobj, &fd);
    return fd;
 }
 
@@ -92,20 +92,20 @@ panfrost_fence_from_fd(struct panfrost_context *ctx, int fd,
       return NULL;
 
    if (type == PIPE_FD_TYPE_NATIVE_SYNC) {
-      ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &f->syncobj);
+      ret = pan_sync_create(panfrost_device_fd(dev), 0, &f->syncobj);
       if (ret) {
          mesa_loge("create syncobj failed\n");
          goto err_free_fence;
       }
 
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), f->syncobj, fd);
+      ret = pan_sync_import_snapshot(panfrost_device_fd(dev), f->syncobj, fd);
       if (ret) {
          mesa_loge("import syncfile failed\n");
          goto err_destroy_syncobj;
       }
    } else {
       assert(type == PIPE_FD_TYPE_SYNCOBJ);
-      ret = drmSyncobjFDToHandle(panfrost_device_fd(dev), fd, &f->syncobj);
+      ret = pan_sync_import_shared(panfrost_device_fd(dev), fd, &f->syncobj);
       if (ret) {
          mesa_loge("import syncobj FD failed\n");
          goto err_free_fence;
@@ -117,7 +117,7 @@ panfrost_fence_from_fd(struct panfrost_context *ctx, int fd,
    return f;
 
 err_destroy_syncobj:
-   drmSyncobjDestroy(panfrost_device_fd(dev), f->syncobj);
+   pan_sync_destroy(panfrost_device_fd(dev), f->syncobj);
 err_free_fence:
    free(f);
    return NULL;
@@ -134,7 +134,7 @@ panfrost_fence_create(struct panfrost_context *ctx)
     * (HandleToFD/FDToHandle just gives you another syncobj ID for the
     * same syncobj).
     */
-   ret = drmSyncobjExportSyncFile(panfrost_device_fd(dev), ctx->syncobj, &fd);
+   ret = pan_sync_export_snapshot(panfrost_device_fd(dev), ctx->syncobj, &fd);
    if (ret || fd == -1) {
       mesa_loge("export failed\n");
       return NULL;

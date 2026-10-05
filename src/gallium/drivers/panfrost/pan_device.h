@@ -30,7 +30,7 @@
 #ifndef PAN_DEVICE_H
 #define PAN_DEVICE_H
 
-#include <xf86drm.h>
+#include "kmod/pan_sync.h"
 #include "renderonly/renderonly.h"
 #include "util/bitset.h"
 #include "util/list.h"

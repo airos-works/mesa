@@ -30,11 +30,16 @@
 
 #include "pan_bo.h"
 #include "pan_context.h"
+#ifdef __HAIKU__
+#include "pan_sw_polygon.h"
+#endif
 #include "pan_minmax_cache.h"
 
 #include "util/format/u_format.h"
 #include "util/half_float.h"
+#ifndef __HAIKU__
 #include "util/libsync.h"
+#endif
 #include "util/macros.h"
 #include "util/u_debug_cb.h"
 #include "util/u_helpers.h"
@@ -538,6 +543,10 @@ panfrost_destroy(struct pipe_context *pipe)
    struct panfrost_context *panfrost = pan_context(pipe);
    struct panfrost_device *dev = pan_device(pipe->screen);
 
+#ifdef __HAIKU__
+   panfrost_sw_polygon_destroy(panfrost);
+#endif
+
    pan_screen(pipe->screen)->vtbl.context_cleanup(panfrost);
 
    u_printf_destroy(&panfrost->printf.ctx);
@@ -563,13 +572,13 @@ panfrost_destroy(struct pipe_context *pipe)
 
    util_dynarray_fini(&panfrost->global_buffers);
 
-   drmSyncobjDestroy(panfrost_device_fd(dev), panfrost->in_sync_obj);
+   pan_sync_destroy(panfrost_device_fd(dev), panfrost->in_sync_obj);
    if (panfrost->in_sync_fd != -1) {
       close(panfrost->in_sync_fd);
       panfrost->in_sync_fd = -1;
    }
 
-   drmSyncobjDestroy(panfrost_device_fd(dev), panfrost->syncobj);
+   pan_sync_destroy(panfrost_device_fd(dev), panfrost->syncobj);
    ralloc_free(pipe);
 }
 
@@ -962,16 +971,30 @@ panfrost_fence_server_sync(struct pipe_context *pctx,
                            struct pipe_fence_handle *f,
                            uint64_t value)
 {
+#ifdef __HAIKU__
+   struct panfrost_context *ctx = pan_context(pctx);
+   int fd = panfrost_device_fd(pan_device(pctx->screen));
+   if (value || ctx->haiku_in_sync_point == UINT64_MAX
+       || pan_sync_transfer(fd, ctx->in_sync_obj, ctx->haiku_in_sync_point + 1,
+                            f->syncobj, 0, 0)) {
+      mesa_loge("Haiku CSF failed to capture a server-wait fence (errno=%d)", errno);
+      ctx->haiku_sync_failed = true;
+      ctx->csf.reset_status = PIPE_UNKNOWN_CONTEXT_RESET;
+      return;
+   }
+   ctx->haiku_in_sync_point++;
+#else
    struct panfrost_device *dev = pan_device(pctx->screen);
    struct panfrost_context *ctx = pan_context(pctx);
    int fd = -1, ret;
    assert(!value);
 
-   ret = drmSyncobjExportSyncFile(panfrost_device_fd(dev), f->syncobj, &fd);
+   ret = pan_sync_export_snapshot(panfrost_device_fd(dev), f->syncobj, &fd);
    assert(!ret);
 
    sync_accumulate("panfrost", &ctx->in_sync_fd, fd);
    close(fd);
+#endif
 }
 
 static const struct debug_named_value panfrost_prio_options[] = {
@@ -1008,7 +1031,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    /* Create a syncobj in a signaled state. Will be updated to point to the
     * last queued job out_sync every time we submit a new job.
     */
-   ret = drmSyncobjCreate(panfrost_device_fd(dev), DRM_SYNCOBJ_CREATE_SIGNALED,
+   ret = pan_sync_create(panfrost_device_fd(dev), PAN_SYNC_CREATE_SIGNALED,
                           &ctx->syncobj);
    if (ret) {
       ralloc_free(ctx);
@@ -1114,7 +1137,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
 
    /* Sync object/FD used for NATIVE_FENCE_FD. */
    ctx->in_sync_fd = -1;
-   ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &ctx->in_sync_obj);
+   ret = pan_sync_create(panfrost_device_fd(dev), 0, &ctx->in_sync_obj);
    assert(!ret);
 
    ctx->printf.bo =

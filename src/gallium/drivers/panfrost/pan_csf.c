@@ -24,6 +24,7 @@
 #include "decode.h"
 
 #include "drm-uapi/panthor_drm.h"
+#include "kmod/pan_csf_kmod.h"
 
 #include "genxml/cs_builder.h"
 
@@ -98,7 +99,7 @@ csf_oom_handler_init(struct panfrost_context *ctx)
    struct panfrost_bo *cs_bo = NULL, *reg_save_bo = NULL;
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    const struct drm_panthor_csif_info *csif_info =
-      panthor_kmod_get_csif_props(dev->kmod.dev);
+      pan_csf_get_csif_props(dev->kmod.dev);
 
    cs_bo =
       panfrost_bo_create(dev, 4096, 0, "Temporary CS buffer");
@@ -257,7 +258,7 @@ GENX(csf_init_batch)(struct panfrost_batch *batch)
       return -1;
 
    const struct drm_panthor_csif_info *csif_info =
-      panthor_kmod_get_csif_props(dev->kmod.dev);
+      pan_csf_get_csif_props(dev->kmod.dev);
 
    const struct cs_builder_conf conf = {
       .nr_registers = csif_info->cs_reg_count,
@@ -301,7 +302,7 @@ csf_prepare_qsubmit(struct panfrost_context *ctx,
       .queue_index = queue,
       .stream_addr = cs_start,
       .stream_size = cs_size,
-      .latest_flush = panthor_kmod_get_flush_id(dev->kmod.dev),
+      .latest_flush = pan_csf_get_flush_id(dev->kmod.dev),
       .syncs = DRM_PANTHOR_OBJ_ARRAY(sync_count, syncs),
    };
 }
@@ -326,8 +327,7 @@ csf_submit_gsubmit(struct panfrost_context *ctx,
    int ret = 0;
 
    if (!ctx->is_noop) {
-      ret = pan_kmod_ioctl(panfrost_device_fd(dev),
-                           DRM_IOCTL_PANTHOR_GROUP_SUBMIT, gsubmit);
+      ret = pan_csf_group_submit(dev->kmod.dev, gsubmit);
    }
 
    if (ret)
@@ -383,6 +383,17 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
    uint32_t bo_sync_handle;
    int ret;
 
+#ifdef __HAIKU__
+   if (ctx->haiku_sync_failed) { errno = EIO; return -1; }
+   if (ctx->haiku_in_sync_point) {
+      struct drm_panthor_sync_op waitop = {
+         .flags = DRM_PANTHOR_SYNC_OP_WAIT | DRM_PANTHOR_SYNC_OP_HANDLE_TYPE_TIMELINE_SYNCOBJ,
+         .handle = ctx->in_sync_obj, .timeline_value = ctx->haiku_in_sync_point,
+      };
+      util_dynarray_append(syncops, struct drm_panthor_sync_op, waitop);
+   }
+#endif
+
    /* We don't wait on BOs attached to the various batch pools, because those
     * are private to the batch, and are guaranteed to be idle at allocation
     * time. We need to iterate over other BOs accessed by the batch though,
@@ -404,7 +415,7 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
        */
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
-      ret = panthor_kmod_bo_get_sync_point(bo->kmod_bo, &bo_sync_handle,
+      ret = pan_csf_bo_get_sync_point(bo->kmod_bo, &bo_sync_handle,
                                            &bo_sync_point,
                                            !(flags & PAN_BO_ACCESS_WRITE));
       if (ret)
@@ -441,7 +452,7 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
    }
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
+      ret = pan_sync_import_snapshot(panfrost_device_fd(dev), ctx->in_sync_obj,
                                      ctx->in_sync_fd);
       if (ret)
          return ret;
@@ -477,7 +488,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
     */
    util_dynarray_foreach(&batch->pool.bos, struct panfrost_bo *, bo) {
       (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
-      ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
+      ret = pan_csf_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
          return ret;
@@ -486,7 +497,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
    util_dynarray_foreach(&batch->csf.cs_chunk_pool.bos, struct panfrost_bo *,
                          bo) {
       (*bo)->gpu_access |= PAN_BO_ACCESS_RW;
-      ret = panthor_kmod_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
+      ret = pan_csf_bo_attach_sync_point((*bo)->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point, true);
       if (ret)
          return ret;
@@ -503,7 +514,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
       struct panfrost_bo *bo = pan_lookup_bo(dev, i);
 
       bo->gpu_access |= flags & (PAN_BO_ACCESS_RW);
-      ret = panthor_kmod_bo_attach_sync_point(bo->kmod_bo, vm_sync_handle,
+      ret = pan_csf_bo_attach_sync_point(bo->kmod_bo, vm_sync_handle,
                                               vm_sync_signal_point,
                                               flags & PAN_BO_ACCESS_WRITE);
       if (ret)
@@ -511,7 +522,7 @@ csf_attach_sync_points(struct panfrost_batch *batch, uint32_t vm_sync_handle,
    }
 
    /* And finally transfer the VM sync point to the context syncobj. */
-   return drmSyncobjTransfer(panfrost_device_fd(dev), ctx->syncobj, 0,
+   return pan_sync_transfer(panfrost_device_fd(dev), ctx->syncobj, 0,
                              vm_sync_handle, vm_sync_signal_point, 0);
 }
 
@@ -543,17 +554,48 @@ update_reset_status(struct panfrost_context *ctx,
    }
 }
 
+#ifdef __HAIKU__
+static enum pipe_reset_status
+csf_native_reset_status(struct panfrost_context *ctx)
+{
+   struct panfrost_device *dev = pan_device(ctx->base.screen);
+   struct pan_haiku_reset_info info;
+   if (haiku_kmod_group_get_reset_info(dev->kmod.dev, ctx->csf.group_handle,
+                                      &info))
+      return PIPE_UNKNOWN_CONTEXT_RESET;
+
+   if (info.state == PAN_HAIKU_RESET_NONE)
+      return PIPE_NO_RESET;
+
+   /* Attribution is unavailable. A completed reset is reported once, while
+    * pending or unrecoverable cleanup must not be reported as complete.
+    */
+   bool reported = ctx->csf.reset_reported;
+   ctx->csf.reset_reported = true;
+   if (info.state == PAN_HAIKU_RESET_PENDING ||
+       info.state == PAN_HAIKU_RESET_UNRECOVERABLE || !reported)
+      return PIPE_UNKNOWN_CONTEXT_RESET;
+   return PIPE_NO_RESET;
+}
+#endif
+
 static void
 csf_check_ctx_state_and_reinit(struct panfrost_context *ctx)
 {
+#ifdef __HAIKU__
+   /* The native runtime and its device bootstrap queue stay failed until all
+    * affected contexts close. Keep the lost context for application cleanup;
+    * an immediate context reinitialization cannot repair this shared state.
+    */
+   update_reset_status(ctx, csf_native_reset_status(ctx));
+#else
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct drm_panthor_group_get_state state = {
       .group_handle = ctx->csf.group_handle,
    };
    int ret;
 
-   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
-                        DRM_IOCTL_PANTHOR_GROUP_GET_STATE, &state);
+   ret = pan_csf_group_get_state(dev->kmod.dev, &state);
    if (ret) {
       update_reset_status(ctx, PIPE_UNKNOWN_CONTEXT_RESET);
       mesa_loge("DRM_IOCTL_PANTHOR_GROUP_GET_STATE failed (err=%d)", errno);
@@ -585,6 +627,7 @@ csf_check_ctx_state_and_reinit(struct panfrost_context *ctx)
 
    mesa_loge("Group became unusable, re-initializing context");
    panfrost_context_reinit(ctx);
+#endif
 }
 
 static void
@@ -604,7 +647,7 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
    /* Wait so we can get errors reported back */
    if (wait) {
       int ret =
-         drmSyncobjTimelineWait(panfrost_device_fd(dev), &vm_sync_handle,
+         pan_sync_timeline_wait(panfrost_device_fd(dev), &vm_sync_handle,
                                 &vm_sync_signal_point, 1, INT64_MAX, 0, NULL);
       assert(ret >= 0);
 
@@ -658,7 +701,7 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
    uint32_t cs_size = cs_root_chunk_size(batch->csf.cs.builder);
    struct panfrost_context *ctx = batch->ctx;
    struct panfrost_device *dev = pan_device(ctx->base.screen);
-   uint32_t vm_sync_handle = panthor_kmod_vm_sync_handle(dev->kmod.vm);
+   uint32_t vm_sync_handle = pan_csf_vm_sync_handle(dev->kmod.vm);
    struct util_dynarray syncops;
 
    util_dynarray_init(&syncops, NULL);
@@ -667,7 +710,7 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
    if (ret)
       goto out_free_syncops;
 
-   uint64_t vm_sync_cur_point = panthor_kmod_vm_sync_lock(dev->kmod.vm);
+   uint64_t vm_sync_cur_point = pan_csf_vm_sync_lock(dev->kmod.vm);
    uint64_t vm_sync_signal_point = vm_sync_cur_point + 1;
 
    struct drm_panthor_sync_op signalop = {
@@ -687,7 +730,7 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
       util_dynarray_num_elements(&syncops, struct drm_panthor_sync_op));
    csf_prepare_gsubmit(ctx, &gsubmit, &qsubmit, 1);
    ret = csf_submit_gsubmit(ctx, &gsubmit);
-   panthor_kmod_vm_sync_unlock(dev->kmod.vm,
+   pan_csf_vm_sync_unlock(dev->kmod.vm,
                                ret ? vm_sync_cur_point : vm_sync_signal_point);
 
    if (!ret) {
@@ -1479,6 +1522,12 @@ static enum pipe_reset_status
 get_device_reset_status(struct pipe_context *pctx)
 {
    struct panfrost_context *ctx = pan_context(pctx);
+#ifdef __HAIKU__
+   /* A reset may occur while this context is idle. Poll the owned queue even
+    * if the application has not attempted another submission.
+    */
+   update_reset_status(ctx, csf_native_reset_status(ctx));
+#endif
    enum pipe_reset_status reset_status = ctx->csf.reset_status;
 
    /* Reset the status before returning. */
@@ -1509,8 +1558,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
    };
 
    int ret =
-      pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_CREATE,
-                     &gc);
+      pan_csf_group_create(dev->kmod.dev, &gc);
 
    if (ret)
       goto err_group_create;
@@ -1530,8 +1578,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       .max_chunks = pan_screen(ctx->base.screen)->csf_tiler_heap.max_chunks,
       .target_in_flight = 65535,
    };
-   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
-                        DRM_IOCTL_PANTHOR_TILER_HEAP_CREATE, &thc);
+   ret = pan_csf_heap_create(dev->kmod.dev, &thc);
 
    if (ret)
       goto err_tiler_heap;
@@ -1577,7 +1624,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       .capacity = panfrost_bo_size(cs_bo) / sizeof(uint64_t),
    };
    const struct drm_panthor_csif_info *csif_info =
-      panthor_kmod_get_csif_props(dev->kmod.dev);
+      pan_csf_get_csif_props(dev->kmod.dev);
    const struct cs_builder_conf bconf = {
       .nr_registers = csif_info->cs_reg_count,
       .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
@@ -1627,7 +1674,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
       goto err_g_submit;
 
    /* Wait before freeing the buffer. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
+   ret = pan_sync_wait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
                         NULL);
    assert(!ret);
 
@@ -1644,11 +1691,9 @@ err_tiler_heap_cs_bo:
 err_tiler_heap_tmp_geom_bo:
    panfrost_bo_unreference(ctx->csf.heap.desc_bo);
 err_tiler_heap_desc_bo:
-   pan_kmod_ioctl(panfrost_device_fd(dev),
-                  DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY, &thd);
+   pan_csf_heap_destroy(dev->kmod.dev, &thd);
 err_tiler_heap:
-   pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY,
-                  &gd);
+   pan_csf_group_destroy(dev->kmod.dev, &gd);
 err_group_create:
    return -1;
 }
@@ -1666,12 +1711,11 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    int ret;
 
    /* Make sure all jobs are done before destroying the heap. */
-   ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
+   ret = pan_sync_wait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
                         NULL);
    assert(!ret);
 
-   ret = pan_kmod_ioctl(panfrost_device_fd(dev),
-                        DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY, &thd);
+   ret = pan_csf_heap_destroy(dev->kmod.dev, &thd);
    assert(!ret);
 
    struct drm_panthor_group_destroy gd = {
@@ -1679,8 +1723,7 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    };
 
    ret =
-      pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANTHOR_GROUP_DESTROY,
-                     &gd);
+      pan_csf_group_destroy(dev->kmod.dev, &gd);
    assert(!ret);
 
    panfrost_bo_unreference(ctx->csf.tmp_geom_bo);

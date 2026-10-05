@@ -238,6 +238,12 @@ struct panfrost_context {
 
    int in_sync_fd;
    uint32_t in_sync_obj;
+#ifdef __HAIKU__
+   uint64_t haiku_in_sync_point;
+   bool haiku_sync_failed;
+   struct panfrost_sw_polygon *sw_polygon;
+   bool sw_polygon_active;
+#endif
 
    union {
       struct panfrost_csf_context csf;
@@ -411,6 +417,10 @@ struct panfrost_uncompiled_shader {
     * as we don't need any compute variants.
     */
    const nir_shader *nir;
+#ifdef __HAIKU__
+   /* Unlowered input retained only for the opt-in geometry experiment. */
+   nir_shader *sw_polygon_nir;
+#endif
 
    /* A SHA1 of the serialized NIR for the disk cache. */
    unsigned char nir_sha1[20];

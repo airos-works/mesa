@@ -32,7 +32,7 @@
  */
 
 #include <fcntl.h>
-#include <xf86drm.h>
+#include "kmod/pan_sync.h"
 #include "drm-uapi/drm_fourcc.h"
 
 #include "frontend/winsys_handle.h"
@@ -241,11 +241,15 @@ panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
 {
    MESA_TRACE_FUNC();
 
-   struct panfrost_device *dev = pan_device(screen);
+   UNUSED struct panfrost_device *dev = pan_device(screen);
    struct panfrost_resource *rsrc = (struct panfrost_resource *)pt;
 
+#ifndef __HAIKU__
    if (rsrc->scanout)
       renderonly_scanout_destroy(rsrc->scanout, dev->ro);
+#else
+   assert(!rsrc->scanout);
+#endif
 
    if (rsrc->shadow_image)
       pipe_resource_reference(
@@ -351,6 +355,9 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
                               const struct pipe_resource *templat,
                               struct winsys_handle *whandle, unsigned usage)
 {
+#ifdef __HAIKU__
+   (void)pscreen; (void)templat; (void)whandle; (void)usage; errno = ENOTSUP; return NULL;
+#else
    struct panfrost_device *dev = pan_device(pscreen);
    struct panfrost_resource *rsc;
    struct pipe_resource *prsc;
@@ -442,6 +449,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
    }
 
    return prsc;
+#endif
 }
 
 static void
@@ -472,6 +480,9 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
                              struct pipe_context *ctx, struct pipe_resource *pt,
                              struct winsys_handle *handle, unsigned usage)
 {
+#ifdef __HAIKU__
+   (void)pscreen; (void)ctx; (void)pt; (void)handle; (void)usage; errno = ENOTSUP; return false;
+#else
    struct panfrost_device *dev = pan_device(pscreen);
    struct panfrost_resource *rsrc = pan_resource(pt);
    struct renderonly_scanout *scanout;
@@ -524,6 +535,7 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
    }
 
    return true;
+#endif
 }
 
 static bool

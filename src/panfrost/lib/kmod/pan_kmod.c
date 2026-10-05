@@ -5,12 +5,15 @@
  */
 
 #include <string.h>
+#ifndef __HAIKU__
 #include <xf86drm.h>
+#endif
 
 #include "util/u_memory.h"
 #include "util/macros.h"
 #include "pan_kmod.h"
 
+#ifndef __HAIKU__
 extern const struct pan_kmod_ops panfrost_kmod_ops;
 extern const struct pan_kmod_ops panthor_kmod_ops;
 
@@ -27,6 +30,8 @@ static const struct {
       &panthor_kmod_ops,
    },
 };
+
+#endif
 
 static void *
 default_zalloc(const struct pan_kmod_allocator *allocator, size_t size,
@@ -50,6 +55,9 @@ struct pan_kmod_dev *
 pan_kmod_dev_create(int fd, uint32_t flags,
                     const struct pan_kmod_allocator *allocator)
 {
+#ifdef __HAIKU__
+   return haiku_kmod_dev_create(fd, flags, allocator ? allocator : &default_allocator);
+#else
    drmVersionPtr version = drmGetVersion(fd);
    struct pan_kmod_dev *dev = NULL;
 
@@ -63,13 +71,15 @@ pan_kmod_dev_create(int fd, uint32_t flags,
       if (!strcmp(drivers[i].name, version->name)) {
          const struct pan_kmod_ops *ops = drivers[i].ops;
 
-         dev = ops->dev_create(fd, flags, version, allocator);
+         struct pan_kmod_version info = {version->version_major, version->version_minor};
+         dev = ops->dev_create(fd, flags, &info, allocator);
          break;
       }
    }
 
    drmFreeVersion(version);
    return dev;
+#endif
 }
 
 void
@@ -138,6 +148,7 @@ pan_kmod_bo_put(struct pan_kmod_bo *bo)
    simple_mtx_unlock(&dev->handle_to_bo.lock);
 }
 
+#ifndef __HAIKU__
 static bool
 pan_kmod_bo_check_import_flags(struct pan_kmod_bo *bo, uint32_t flags)
 {
@@ -149,9 +160,14 @@ pan_kmod_bo_check_import_flags(struct pan_kmod_bo *bo, uint32_t flags)
    return (bo->flags & mask) == (flags & mask);
 }
 
+#endif
+
 struct pan_kmod_bo *
 pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd, uint32_t flags)
 {
+#ifdef __HAIKU__
+   (void)dev; (void)fd; (void)flags; errno = ENOTSUP; return NULL;
+#else
    struct pan_kmod_bo *bo = NULL;
    struct pan_kmod_bo **slot;
 
@@ -202,5 +218,6 @@ err_unlock:
    simple_mtx_unlock(&dev->handle_to_bo.lock);
 
    return NULL;
+#endif
 }
 

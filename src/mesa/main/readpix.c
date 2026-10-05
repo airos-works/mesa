@@ -30,6 +30,7 @@
 #include "context.h"
 #include "enums.h"
 #include "readpix.h"
+#include "util/summit_parallel_copy.h"
 #include "framebuffer.h"
 #include "formats.h"
 #include "format_unpack.h"
@@ -269,15 +270,8 @@ readpixels_memcpy(struct gl_context *ctx,
    bytesPerRow = texelBytes * width;
 
    /* memcpy*/
-   if (dstStride == stride && dstStride == bytesPerRow) {
-      memcpy(dst, map, bytesPerRow * height);
-   } else {
-      for (j = 0; j < height; j++) {
-         memcpy(dst, map, bytesPerRow);
-         dst += dstStride;
-         map += stride;
-      }
-   }
+   (void)j;
+   summit_copy_rows(dst, dstStride, map, stride, bytesPerRow, height);
 
    _mesa_unmap_renderbuffer(ctx, rb);
    return GL_TRUE;

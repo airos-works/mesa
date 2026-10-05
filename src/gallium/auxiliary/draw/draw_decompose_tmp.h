@@ -255,17 +255,19 @@ FUNC(FUNC_VARS)
                QUAD(0, idx[3], idx[2],
                     idx[0], idx[1]);
 #else
-               flags = DRAW_PIPE_RESET_STIPPLE |
-                       DRAW_PIPE_EDGE_FLAG_0 |
-                       DRAW_PIPE_EDGE_FLAG_1;
-               /* always emit idx[3] / idx[0 first */
+               /* Preserve the outer strip edges after rotating triangles
+                * to put the provoking vertex first.  The idx[0] -> idx[3]
+                * diagonal is internal when the first vertex provokes. */
+               flags = DRAW_PIPE_RESET_STIPPLE | DRAW_PIPE_EDGE_FLAG_1 |
+                       (quads_flatshade_last ? DRAW_PIPE_EDGE_FLAG_0 : DRAW_PIPE_EDGE_FLAG_2);
+               /* always emit idx[3] / idx[0] first */
                if (quads_flatshade_last)
                   TRIANGLE(flags, idx[3], idx[2], idx[0]);
                else
                   TRIANGLE(flags, idx[0], idx[3], idx[2]);
 
                flags = DRAW_PIPE_EDGE_FLAG_1 |
-                       DRAW_PIPE_EDGE_FLAG_2;
+                       (quads_flatshade_last ? DRAW_PIPE_EDGE_FLAG_2 : DRAW_PIPE_EDGE_FLAG_0);
                if (quads_flatshade_last)
                   TRIANGLE(flags, idx[3], idx[0], idx[1]);
                else

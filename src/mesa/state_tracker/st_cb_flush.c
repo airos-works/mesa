@@ -159,8 +159,19 @@ st_get_graphics_reset_status(struct gl_context *ctx)
       st->reset_status = PIPE_NO_RESET;
    } else {
       status = st->pipe->get_device_reset_status(st->pipe);
+#ifdef __HAIKU__
+      if (status != PIPE_NO_RESET) {
+         /* This polled event is returned by this call. Do not also cache it
+          * as a callback event: that would replay a completed reset and
+          * skip the next native recovery-state query. Real callback events
+          * still use st_device_reset_callback() and are consumed above.
+          */
+         _mesa_set_context_lost_dispatch(st->ctx);
+      }
+#else
       if (status != PIPE_NO_RESET)
          st_device_reset_callback(st, status);
+#endif
    }
 
    return gl_reset_status_from_pipe_reset_status(status);

@@ -1429,5 +1429,9 @@ zink_bo_deinit(struct zink_screen *screen)
       if (screen->pb.bo_slabs[i].groups)
          pb_slabs_deinit(&screen->pb.bo_slabs[i]);
    }
-   pb_cache_deinit(&screen->pb.bo_cache);
+   /* A screen that failed before zink_bo_init() has no cache, and its mutex
+    * was never initialized: tearing it down asserted in mtx_lock (Summit saw
+    * web processes abort in eglInitialize when the GPU was out of memory). */
+   if (screen->pb.bo_cache.buckets)
+      pb_cache_deinit(&screen->pb.bo_cache);
 }

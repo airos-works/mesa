@@ -37,9 +37,35 @@ Qualification checkpoint, 2026-10-11:
   assertion. Userspace never substitutes invented hardware query values.
   The probe disables interactive debugger attachment so failures terminate.
 
-This qualifies the initial private EGL clear/shader gate. Texturing/blending,
-multiple contexts, window presentation, applications, broader API coverage,
-performance and general unprivileged command safety remain unqualified.
+Compositor checkpoint, same day, commit 760c04a:
+- native_compositor_probe.cpp tests shared texture upload, GLSL texturing,
+  scissor/alpha blending, pbuffer/default framebuffer, a worker thread with
+  shared contexts, and EGL_PLATFORM_SURFACELESS_MESA.
+- The first native run passed its small scene, then asserted in a pthread
+  mutex. Debugger traced this to si_set_shader_buffer during a texture's
+  compute metadata clear. Textures do not initialize valid_buffer_range.
+  Shader-buffer and CP DMA range tracking now require PIPE_BUFFER, matching
+  image range tracking, without changing texture synchronization.
+- Both changed C units compile with the host Haiku cross compiler using the
+  native preprocessed configuration. The full native build passes. QEMU
+  softpipe passes the basic/no-device gates and every compositor scene.
+- Native library 18d872ff57a9bd36f0a30761bf33527174226585b5e85c4f3a400757a73de440
+  passes all 4096 small and 786432 large pixels in each of three scenes.
+  Thirty draw+finish and thirty draw+readback frames per scene measure
+  6.37--6.59 ms and 8.39--9.01 ms respectively on the native WX5100.
+  These are probe timings, not application or display latency measurements.
+- The basic gate adds two EGL setup jobs plus eight measured shader jobs;
+  the compositor adds 221 jobs (fences 141 to 362, EOPs 282 to 724).
+  After teardown, 190 client jobs, 61 legacy checks, both DMA paths and
+  byte-exact H.264/HEVC regressions pass. Final IRQ: 552 completions/waits,
+  1104 EOPs, empty ring, no faults/unknown/overflow. VNC desktop is intact.
+  The host harness initially omitted the two EGL setup jobs; its counter
+  assertion was corrected by inspecting the completed run, without rerunning
+  rendering or resetting a successful GPU workload.
+
+This qualifies private EGL shader and compositor probes. Native window
+presentation, applications, broader API coverage, general performance and
+unprivileged command safety remain unqualified. System defaults are unchanged.
 
 Configure with platforms=haiku, egl=enabled, glvnd=enabled, glx=disabled,
 gbm=disabled, gallium-drivers=radeonsi,softpipe, vulkan-drivers=[],
@@ -54,3 +80,7 @@ run-probe.sh expects the executable, prefix/lib and an absolute-path GLVND
 --hardware additionally requires the render-info kernel ABI and healthy MSI
 completion counters to advance during the GL work. A renderer string alone
 does not pass the probe.
+
+Build native_compositor_probe.cpp with the same include/library paths and
+-std=c++17. run-compositor.sh selects --hardware or --software in that private
+prefix. Hardware mode additionally verifies healthy advancing GPU counters.

@@ -418,7 +418,12 @@ int ac_drm_bo_va_op_raw(ac_drm_device *d, uint32_t id, uint64_t offset, uint64_t
       if (!err) d->mappings.erase(it);
       return err;
    }
-   const uint64_t supported = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE | AMDGPU_VM_PAGE_EXECUTABLE;
+   // RadeonSI marks IB allocations UC to bypass GL2 on hardware that supports
+   // per-page memory types. GFX8 has no such PTE field; Linux's
+   // gmc_v8_0_get_vm_pte likewise ignores this hint. Keep the native GFX8
+   // cache policy and permissions, accepting only default or the UC hint.
+   const uint64_t supported = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE
+      | AMDGPU_VM_PAGE_EXECUTABLE | AMDGPU_VM_MTYPE_UC;
    if (op != AMDGPU_VA_OP_MAP || flags & ~supported) return -ENOTSUP;
    auto b = lookup(d, id);
    if (!b || !range(offset, size, b->native.bytes)) return -EINVAL;

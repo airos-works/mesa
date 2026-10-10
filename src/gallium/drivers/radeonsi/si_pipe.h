@@ -324,7 +324,7 @@ struct si_resource {
    enum radeon_bo_flag flags:16;
    unsigned bind_history; /* bitmask of SI_BIND_xxx_BUFFER */
 
-   /* The buffer range which is initialized (with a write transfer,
+   /* For PIPE_BUFFER resources only. The range initialized (with a write transfer,
     * streamout, DMA, or as a random access target). The rest of
     * the buffer is considered invalid and can be mapped unsynchronized.
     *

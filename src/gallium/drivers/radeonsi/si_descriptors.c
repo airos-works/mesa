@@ -1321,8 +1321,13 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
    if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
       si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 
-   util_range_add(&buf->b.b, &buf->valid_buffer_range, sbuffer->buffer_offset,
-                  sbuffer->buffer_offset + sbuffer->buffer_size);
+   /* Internal metadata clears also bind textures as shader buffers. Only
+    * PIPE_BUFFER resources initialize and use valid_buffer_range; touching
+    * a texture's uninitialized mutex fails on platforms such as Haiku.
+    */
+   if (buf->b.b.target == PIPE_BUFFER)
+      util_range_add(&buf->b.b, &buf->valid_buffer_range, sbuffer->buffer_offset,
+                     sbuffer->buffer_offset + sbuffer->buffer_size);
 }
 
 void si_set_shader_buffers(struct pipe_context *ctx, mesa_shader_stage shader,

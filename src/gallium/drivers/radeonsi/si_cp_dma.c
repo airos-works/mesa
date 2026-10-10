@@ -160,8 +160,9 @@ void si_cp_dma_clear_buffer(struct si_context *sctx, struct radeon_cmdbuf *cs,
 
    /* Mark the buffer range of destination as valid (initialized),
     * so that transfer_map knows it should wait for the GPU when mapping
-    * that range. */
-   util_range_add(dst, &sdst->valid_buffer_range, offset, offset + size);
+    * that range. Texture metadata clears don't use buffer range tracking. */
+   if (dst->target == PIPE_BUFFER)
+      util_range_add(dst, &sdst->valid_buffer_range, offset, offset + size);
 
    while (size) {
       unsigned byte_count = MIN2(size, cp_dma_max_byte_count(sctx));
@@ -245,7 +246,8 @@ void si_cp_dma_copy_buffer(struct si_context *sctx, struct pipe_resource *dst,
     * so that transfer_map knows it should wait for the GPU when mapping
     * that range.
     */
-   util_range_add(dst, &si_resource(dst)->valid_buffer_range, dst_offset, dst_offset + size);
+   if (dst->target == PIPE_BUFFER)
+      util_range_add(dst, &si_resource(dst)->valid_buffer_range, dst_offset, dst_offset + size);
 
    dst_offset += si_resource(dst)->gpu_address;
    src_offset += si_resource(src)->gpu_address;

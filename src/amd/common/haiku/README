@@ -63,9 +63,27 @@ Compositor checkpoint, same day, commit 760c04a:
   assertion was corrected by inspecting the completed run, without rerunning
   rendering or resetting a successful GPU workload.
 
-This qualifies private EGL shader and compositor probes. Native window
-presentation, applications, broader API coverage, general performance and
-unprivileged command safety remain unqualified. System defaults are unchanged.
+Window checkpoint, same library and kernel:
+- native_window_probe.cpp runs a normal BApplication loop and renders on a
+  worker thread through EGL_WINDOW_BIT and the real BitmapHook interface.
+  Thirty-six swaps cover 320x192, 513x257 and 128x96 sizes, checking every
+  published BGRA pixel and independent app_server screen pixels. Surface
+  destruction must detach the bitmap before its owner is destroyed.
+- Host cross compilation, native compilation and QEMU softpipe pass. QEMU's
+  blanked desktop initially produced black screen captures; waking it allows
+  the complete visible-pixel gate to pass. Keep displays awake for this test.
+- Native probe 0dbf62da8fc538d36fe5d23e5a5a1fff971326f668f7587f220e6bbba5ba2967
+  passes all swaps, resize and pixel checks. GPU fences advance 552 to 633,
+  EOPs 1104 to 1266. Both DMA paths and 131 further bounded jobs pass; final
+  counters are 764 fences/waits and 1528 EOPs, with no IRQ errors.
+  A host substring count also matched the final PASS line; anchored scene
+  records and follow-up checks verify the same completed run without a retry.
+
+This qualifies private EGL shader, compositor and window probes. Window
+presentation still copies GPU-rendered pixels through a CPU bitmap to the
+existing app_server. Native scanout/display acceleration, applications,
+broader API coverage, general performance and unprivileged command safety
+remain unqualified. System defaults are unchanged.
 
 Configure with platforms=haiku, egl=enabled, glvnd=enabled, glx=disabled,
 gbm=disabled, gallium-drivers=radeonsi,softpipe, vulkan-drivers=[],
@@ -84,3 +102,7 @@ does not pass the probe.
 Build native_compositor_probe.cpp with the same include/library paths and
 -std=c++17. run-compositor.sh selects --hardware or --software in that private
 prefix. Hardware mode additionally verifies healthy advancing GPU counters.
+
+Build native_window_probe.cpp with the same paths plus
+src/gallium/winsys/sw/hgl, then use run-window.sh --hardware or --software.
+The test requires a visible, unobscured desktop and exits after its checks.

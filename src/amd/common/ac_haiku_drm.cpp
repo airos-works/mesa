@@ -517,8 +517,13 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
       if (c.chunk_id == AMDGPU_CHUNK_ID_IB) {
          if (c.length_dw != sizeof(drm_amdgpu_cs_chunk_ib) / 4 || ibs.size() == 2) return -EINVAL;
          auto ib = *(drm_amdgpu_cs_chunk_ib*)ptr;
+         // Mesa sets this cache hint on every GFX IB. Native submission waits
+         // for the whole job, so its stronger final writeback/invalidation is
+         // safe: no draw from this IB can still be executing when it happens.
+         const uint32_t supported_ib_flags = AMDGPU_IB_FLAG_PREAMBLE
+            | AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE;
          if (ib.ip_type != AMDGPU_HW_IP_GFX || ib.ip_instance || ib.ring
-             || ib.flags & ~AMDGPU_IB_FLAG_PREAMBLE || !ib.ib_bytes || ib.ib_bytes & 3) return -ENOTSUP;
+             || ib.flags & ~supported_ib_flags || !ib.ib_bytes || ib.ib_bytes & 3) return -ENOTSUP;
          bytes += ib.ib_bytes; ibs.push_back(ib);
       } else if (c.chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_IN || c.chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_OUT) {
          auto sem = (drm_amdgpu_cs_chunk_sem*)ptr;

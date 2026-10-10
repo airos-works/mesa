@@ -165,6 +165,15 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    if (!err) err = native_call(d, AMDGPU_VM_INFO, vm);
    if (!err && (d->identity.device != 0x67c7 || d->info.gfx_major != 8
                || d->info.address_end <= (8ull << 30) || d->info.max_ib_bytes < 65536)) err = -ENOTSUP;
+   // Mesa's color-2D table slot must describe the eight-pipe Polaris layout.
+   // Firmware's inherited table is not necessarily initialized for graphics.
+   // Reject it before ac_query_gpu_info/addrlib can assert; never substitute
+   // invented query values while the hardware still has different tables.
+   if (!err && ((d->info.tile_mode[14] >> 6) & 31) != 12) {
+      fprintf(stderr, "amdgpu: native kernel must initialize Polaris tile tables (color-2D %#x)\n",
+              d->info.tile_mode[14]);
+      err = -ENOTSUP;
+   }
    // Reserve a private submission buffer outside the application VA heaps.
    if (!err) {
       d->commands = request<amdgpu_buffer>(); d->commands.bytes = d->info.max_ib_bytes;

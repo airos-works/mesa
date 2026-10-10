@@ -26,6 +26,13 @@ Qualification checkpoint, 2026-10-11:
   clear pixels and all 4096 compiled vertex/fragment shader pixels. Explicit
   AMD selection fails EGL initialization on the device-less VM, with no
   software substitution. Native RadeonSI GPU execution is not yet qualified.
+- First native trial reaches GPU information processing, then rejects the
+  inherited color-2D tile layout (slot 14 = 0x05403ddc, pipe configuration 23).
+  The backend now rejects that unsupported table before Mesa's assertion,
+  and the probe disables interactive debugger attachment so a failure exits.
+  The kernel must program the actual Polaris tables before this backend can
+  render; userspace must not replace hardware query data with invented values.
+  Cold recovery to the prior driver and both DMA paths passed after the trial.
 
 Configure with platforms=haiku, egl=enabled, glvnd=enabled, glx=disabled,
 gbm=disabled, gallium-drivers=radeonsi,softpipe, vulkan-drivers=[],

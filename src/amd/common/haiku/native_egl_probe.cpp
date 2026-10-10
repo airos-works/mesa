@@ -40,6 +40,9 @@ static amdgpu_irq_info interrupts(int fd)
 int main(int argc, char **argv)
 {
    setvbuf(stdout, nullptr, _IOLBF, 0);
+   // Keep assertion/crash diagnostics on stderr and let the test terminate
+   // instead of waiting indefinitely for the interactive debugger dialog.
+   disable_debugger(1);
    bool hardware = argc == 2 && !strcmp(argv[1], "--hardware");
    bool absent = argc == 2 && !strcmp(argv[1], "--expect-no-device");
    bool software = argc == 2 && !strcmp(argv[1], "--software");

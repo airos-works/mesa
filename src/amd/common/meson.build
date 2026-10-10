@@ -127,7 +127,9 @@ amd_common_files = files(
   'nir/ac_nir_surface.h',
 )
 
-if not with_platform_windows
+if with_platform_haiku
+  amd_common_files += files('ac_haiku_drm.cpp')
+elif not with_platform_windows
   amd_common_files += files(
     'ac_linux_drm.c',
   )
@@ -158,7 +160,7 @@ libamd_common = static_library(
   'amd_common',
   [amd_common_files, sid_tables_h, amdgfxregs_h, gfx10_format_table_c],
   include_directories : [
-    inc_include, inc_src, inc_amd, inc_virtio_gpu,
+    inc_include, inc_src, inc_amd, inc_virtio_gpu, include_directories('haiku'),
   ],
   dependencies : [dep_llvm.partial_dependency(compile_args: true, includes: true)] + [
     dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,

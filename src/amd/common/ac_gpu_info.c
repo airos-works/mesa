@@ -53,6 +53,10 @@ drmGetFormatModifierName(uint64_t modifier)
 {
    return NULL;
 }
+#elif defined(__HAIKU__)
+#include <unistd.h>
+static int drmGetCap(int fd, uint64_t capability, uint64_t *value) { return -ENOTSUP; }
+static char *drmGetFormatModifierName(uint64_t modifier) { return NULL; }
 #else
 #include <xf86drm.h>
 #include <unistd.h>
@@ -271,15 +275,17 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    if (require_pci_bus_info && !info->pci.valid)
       return AC_QUERY_GPU_INFO_FAIL;
 
-   assert(info->drm_major == 3);
    info->is_amdgpu = true;
 
+#ifndef __HAIKU__
+   assert(info->drm_major == 3);
    if (info->drm_minor < 42) {
       fprintf(stderr, "amdgpu: DRM version is %u.%u.%u, but this driver is "
                       "only compatible with 3.42.0 (kernel 5.15+) or later.\n",
               info->drm_major, info->drm_minor, info->drm_patchlevel);
       return AC_QUERY_GPU_INFO_FAIL;
    }
+#endif
 
    if (ac_drm_device_get_sync_provider(dev)->wait == NULL) {
       fprintf(stderr, "amdgpu: syncobj support is missing but is required.\n");
@@ -1618,6 +1624,9 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          exit(0);
       }
    }
+#ifdef __HAIKU__
+   ac_haiku_limit_gpu_info(dev, info);
+#endif
    return AC_QUERY_GPU_INFO_SUCCESS;
 }
 
@@ -1998,7 +2007,8 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
       for (unsigned i = 0; i < modifier_count; i++) {
          char *name = drmGetFormatModifierName(modifiers[i]);
 
-         fprintf(f, "    %s\n", name);
+         if (name)
+            fprintf(f, "    %s\n", name);
          free(name);
       }
    }

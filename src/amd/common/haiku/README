@@ -1,0 +1,42 @@
+The native ABI headers are copied verbatim from air/OS Haiku commit
+27d977b422 (AMDGPU_HAIKU_ABI_VERSION 1 plus AMDGPU_RENDER_INFO).
+They are MIT licensed; changes must stay synchronized with the kernel source.
+
+amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
+retained with its MIT license to keep Mesa's internal ac_drm_* argument types.
+The Haiku backend does not link libdrm or issue Linux DRM ioctls.
+
+This is an opt-in, root-only backend under active qualification, selected by
+HAIKU_AMDGPU_DEVICE=/dev/dri/amdgpu/0 in the private EGL build. It does not
+install a system renderer or imply unprivileged command safety or reset/reuse.
+
+The backend implements private BOs, 64 GiB file-local GPU address spaces,
+binary CPU synchronization and synchronous graphics submission. It copies
+the preamble and main IB into one owned command buffer and signals Mesa's
+fence only after the kernel's private hardware completion fence. Device loss
+is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
+sync, sparse mapping, migration and reset are not advertised. Video decoding
+continues through the separate native media add-on.
+
+Qualification checkpoint, 2026-10-11:
+- Native GCC 13.3 / LLVM 20.1.8 full EGL + RadeonSI + softpipe build passes.
+- Traditional GNU TLS is required (-mtls-dialect=gnu); no TLSDESC relocations.
+- Standalone native_egl_probe.cpp cross-compiles with -Wall -Wextra -Werror.
+- The same private library runs in Haiku QEMU: softpipe matches all 4096
+  clear pixels and all 4096 compiled vertex/fragment shader pixels. Explicit
+  AMD selection fails EGL initialization on the device-less VM, with no
+  software substitution. Native RadeonSI GPU execution is not yet qualified.
+
+Configure with platforms=haiku, egl=enabled, glvnd=enabled, glx=disabled,
+gbm=disabled, gallium-drivers=radeonsi,softpipe, vulkan-drivers=[],
+gallium-va=disabled, llvm=enabled, and a private prefix. The native build uses
+libelf 0.8.13, LLVM 20.1.8 and a separate libglvnd 1.7.0 prefix. Never replace
+the installed software renderer while qualifying this prototype.
+
+Build native_egl_probe.cpp with the private EGL/GLES2 include directory and
+this directory on the include path, -mtls-dialect=gnu, and -lEGL -lGLESv2 -lbe.
+run-probe.sh expects the executable, prefix/lib and an absolute-path GLVND
+50_mesa.json in /boot/home/wx5100/mesa-amdgpu (or HAIKU_AMDGPU_TEST_ROOT).
+--hardware additionally requires the render-info kernel ABI and healthy MSI
+completion counters to advance during the GL work. A renderer string alone
+does not pass the probe.

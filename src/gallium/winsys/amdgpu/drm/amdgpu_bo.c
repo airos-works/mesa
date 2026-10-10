@@ -9,7 +9,9 @@
 
 #include "amdgpu_cs.h"
 
+#ifndef __HAIKU__
 #include "util/os_drm.h"
+#endif
 #include "util/hash_table.h"
 #include "util/log.h"
 #include "util/os_time.h"
@@ -19,7 +21,9 @@
 #include "drm-uapi/amdgpu_drm.h"
 #include "drm-uapi/dma-buf.h"
 #include "sid.h"
+#ifndef __HAIKU__
 #include <xf86drm.h>
+#endif
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -295,9 +299,10 @@ void amdgpu_bo_destroy(struct amdgpu_winsys *aws, struct pb_buffer_lean *_buf)
 
       entry = _mesa_hash_table_search(sws_iter->kms_handles, bo);
       if (entry) {
+#ifndef __HAIKU__
          struct drm_gem_close args = { .handle = (uintptr_t)entry->data };
-
          drm_ioctl(sws_iter->fd, DRM_IOCTL_GEM_CLOSE, &args);
+#endif
          _mesa_hash_table_remove(sws_iter->kms_handles, entry);
       }
    }
@@ -1808,7 +1813,11 @@ static bool amdgpu_bo_get_handle(struct radeon_winsys *rws,
    if (whandle->type == WINSYS_HANDLE_TYPE_KMS) {
       int dma_fd = whandle->handle;
 
+#ifdef __HAIKU__
+      r = -ENOTSUP;
+#else
       r = drmPrimeFDToHandle(sws->fd, dma_fd, &whandle->handle);
+#endif
       close(dma_fd);
 
       if (r)

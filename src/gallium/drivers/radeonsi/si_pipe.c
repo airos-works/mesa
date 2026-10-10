@@ -34,7 +34,12 @@
 #include "virtio/virtio-gpu/drm_hw.h"
 #endif
 
+#ifndef __HAIKU__
 #include <xf86drm.h>
+#else
+#include <fcntl.h>
+#include "util/driconf.h"
+#endif
 
 static struct pipe_context *si_create_context(struct pipe_screen *screen, unsigned flags);
 
@@ -1672,11 +1677,13 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
 struct pipe_screen *radeonsi_screen_create(int fd, const struct pipe_screen_config *config)
 {
    struct radeon_winsys *rw = NULL;
+#ifndef __HAIKU__
    drmVersionPtr version;
 
    version = drmGetVersion(fd);
    if (!version)
      return NULL;
+#endif
 
 #if AMD_LLVM_AVAILABLE
    /* LLVM must be initialized before util_queue because both u_queue and LLVM call atexit,
@@ -1691,6 +1698,9 @@ struct pipe_screen *radeonsi_screen_create(int fd, const struct pipe_screen_conf
    driParseConfigFiles(config->options, config->options_info, 0, "radeonsi",
                        NULL, NULL, NULL, 0, NULL, 0);
 
+#ifdef __HAIKU__
+   rw = amdgpu_winsys_create(fd, config, radeonsi_screen_create_impl, false);
+#else
 #ifdef HAVE_AMDGPU_VIRTIO
    if (strcmp(version->name, "virtio_gpu") == 0) {
       rw = amdgpu_winsys_create(fd, config, radeonsi_screen_create_impl, true);
@@ -1708,10 +1718,13 @@ struct pipe_screen *radeonsi_screen_create(int fd, const struct pipe_screen_conf
          break;
       }
    }
+#endif
 
    si_driver_ds_init();
 
+#ifndef __HAIKU__
    drmFreeVersion(version);
+#endif
    return rw ? rw->screen : NULL;
 }
 
@@ -1726,3 +1739,25 @@ void si_put_aux_context_flush(struct si_aux_context *ctx)
    ctx->ctx->flush(ctx->ctx, NULL, 0);
    mtx_unlock(&ctx->lock);
 }
+
+#ifdef __HAIKU__
+struct pipe_screen *radeonsi_haiku_screen_create(const char *device)
+{
+   static const driOptionDescription descriptions[] = {
+#include "driinfo_radeonsi.h"
+   };
+#undef OPT_BOOL
+#undef OPT_INT
+   int fd = open(device, O_RDWR | O_CLOEXEC);
+   if (fd < 0)
+      return NULL;
+   driOptionCache info = {0}, options = {0};
+   driParseOptionInfo(&info, descriptions, ARRAY_SIZE(descriptions));
+   struct pipe_screen_config config = { .options_info = &info, .options = &options };
+   struct pipe_screen *screen = radeonsi_screen_create(fd, &config);
+   driDestroyOptionCache(&options);
+   driDestroyOptionInfo(&info);
+   close(fd); /* The native backend owns a duplicate of this file. */
+   return screen;
+}
+#endif

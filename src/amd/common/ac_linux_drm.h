@@ -11,7 +11,11 @@
 
 #if !defined(_WIN32)
 #include "drm-uapi/amdgpu_drm.h"
+#ifdef __HAIKU__
+#include "haiku/amdgpu_libdrm_types.h"
+#else
 #include "amdgpu.h"
+#endif
 #else
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
 #define DRM_CAP_SYNCOBJ 0x13
@@ -446,6 +450,10 @@ PROC int ac_drm_userq_signal(ac_drm_device *dev, struct drm_amdgpu_userq_signal 
 PROC int ac_drm_userq_wait(ac_drm_device *dev, struct drm_amdgpu_userq_wait *wait_data) TAIL;
 
 PROC int ac_drm_query_pci_bus_info(ac_drm_device *dev, struct radeon_info *info) TAIL;
+
+#ifdef __HAIKU__
+void ac_haiku_limit_gpu_info(ac_drm_device *dev, struct radeon_info *info);
+#endif
 
 #ifdef __cplusplus
 }

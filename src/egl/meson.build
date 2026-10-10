@@ -148,7 +148,10 @@ elif with_platform_haiku
   incs_for_egl += [include_directories('../gallium/frontends/hgl')]
 
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl, libglapi]
-  deps_for_egl += [cpp.find_library('be'), driver_swrast, driver_panfrost, driver_zink, idep_xmlconfig]
+  if with_gallium_radeonsi
+    link_for_egl += [libgalliumvl]
+  endif
+  deps_for_egl += [cpp.find_library('be'), driver_swrast, driver_panfrost, driver_zink, driver_radeonsi, idep_xmlconfig]
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='

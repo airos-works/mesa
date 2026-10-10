@@ -10,7 +10,9 @@
 #include "util/u_queue.h"
 #include "util/u_upload_mgr.h"
 
+#ifndef __HAIKU__
 #include <libsync.h>
+#endif
 
 struct si_fine_fence {
    struct si_resource *buf;

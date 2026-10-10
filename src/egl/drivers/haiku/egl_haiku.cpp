@@ -53,6 +53,11 @@
 
 #include "hgl/hgl_sw_winsys.h"
 #include "hgl_context.h"
+#ifdef GALLIUM_RADEONSI
+extern "C" {
+#include "radeonsi/si_public.h"
+}
+#endif
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
@@ -462,6 +467,17 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    disp->DriverData = (void *)hgl_dpy;
 
    struct pipe_screen *screen = NULL;
+   bool native_amd_requested = false;
+#ifdef GALLIUM_RADEONSI
+   const char *amd_device = getenv("HAIKU_AMDGPU_DEVICE");
+   native_amd_requested = amd_device && *amd_device;
+   if (native_amd_requested) {
+      hgl_dpy->native_csf = true; // Existing native texture presentation callback.
+      if (!disp->Options.ForceSoftware)
+         screen = radeonsi_haiku_screen_create(amd_device);
+   }
+#endif
+   if (!native_amd_requested) {
 #ifdef GALLIUM_PANFROST
    const char *device = getenv("HAIKU_CSF_DEVICE");
    bool explicit_device = device != NULL && *device != '\0';
@@ -500,6 +516,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
          if (!screen)
             winsys->destroy(winsys);
       }
+   }
    }
    if (!screen) {
       free(hgl_dpy);

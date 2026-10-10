@@ -9,7 +9,9 @@
 
 #include "amdgpu_cs.h"
 
+#ifndef __HAIKU__
 #include "util/os_drm.h"
+#endif
 #include "util/os_file.h"
 #include "util/os_misc.h"
 #include "util/u_cpu_detect.h"
@@ -18,7 +20,9 @@
 #include "util/thread_sched.h"
 #include "util/xmlconfig.h"
 #include "drm-uapi/amdgpu_drm.h"
+#ifndef __HAIKU__
 #include <xf86drm.h>
+#endif
 #include <stdio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -270,12 +274,14 @@ static bool amdgpu_winsys_unref(struct radeon_winsys *rws)
    simple_mtx_unlock(&aws->sws_list_lock);
 
    if (ret && sws->kms_handles) {
+#ifndef __HAIKU__
       struct drm_gem_close args;
 
       hash_table_foreach(sws->kms_handles, entry) {
          args.handle = (uintptr_t)entry->data;
          drm_ioctl(sws->fd, DRM_IOCTL_GEM_CLOSE, &args);
       }
+#endif
       _mesa_hash_table_destroy(sws->kms_handles, NULL);
    }
 
@@ -445,6 +451,11 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
        * Get the correct fd or the buffer sharing will not work (see #3424).
        */
       aws->fd = ac_drm_device_get_fd(dev);
+#ifdef __HAIKU__
+      /* Each native backend owns a dup of exactly this incoming file. Native
+       * devices are not deduplicated by PCI identity; their VMs are private. */
+      sws->fd = aws->fd;
+#else
       if (!are_file_descriptions_equal(aws->fd, fd)) {
          sws->kms_handles = _mesa_hash_table_create(NULL, kms_handle_hash,
                                                    kms_handle_equals);
@@ -453,6 +464,7 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
       } else {
          sws->fd = aws->fd;
       }
+#endif
       aws->info.drm_major = drm_major;
       aws->info.drm_minor = drm_minor;
 

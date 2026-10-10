@@ -1376,6 +1376,11 @@ static int amdgpu_cs_submit_ib_kernelq(struct amdgpu_cs *acs,
 
    assert(num_chunks <= 8);
 
+#ifdef __HAIKU__
+   /* A native submit waits for its hardware fence and quarantines a failed
+    * engine. Retrying it cannot recover an allocation or submission failure. */
+   return ac_drm_cs_submit_raw2(aws->dev, acs->ctx->ctx_handle, 0, num_chunks, chunks, seq_no);
+#else
    /* Submit the command buffer.
     *
     * The kernel returns -ENOMEM with many parallel processes using GDS such as test suites
@@ -1393,6 +1398,7 @@ static int amdgpu_cs_submit_ib_kernelq(struct amdgpu_cs *acs,
    } while (r == -ENOMEM);
 
    return r;
+#endif
 }
 
 static void amdgpu_cs_add_userq_packets(struct amdgpu_userq *userq,

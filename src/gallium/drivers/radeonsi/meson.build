@@ -167,10 +167,14 @@ libradeonsi = static_library(
   dependencies : radeonsi_deps,
 )
 
+radeonsi_legacy_winsys = []
+if not with_platform_haiku
+  radeonsi_legacy_winsys += libradeonwinsys
+endif
 driver_radeonsi = declare_dependency(
   compile_args : ['-DGALLIUM_RADEONSI'] + libradeonsi_cflags,
-  link_with : radeonsi_gfx_libs + [
-    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common, libamd_common_llvm, libvpe, libgm, liblanczos
+  link_with : radeonsi_gfx_libs + radeonsi_legacy_winsys + [
+    libradeonsi, libamdgpuwinsys, libamd_common, libamd_common_llvm, libvpe, libgm, liblanczos
   ],
   dependencies : idep_nir,
 )

@@ -25,14 +25,21 @@ Qualification checkpoint, 2026-10-11:
 - The same private library runs in Haiku QEMU: softpipe matches all 4096
   clear pixels and all 4096 compiled vertex/fragment shader pixels. Explicit
   AMD selection fails EGL initialization on the device-less VM, with no
-  software substitution. Native RadeonSI GPU execution is not yet qualified.
-- First native trial reaches GPU information processing, then rejects the
-  inherited color-2D tile layout (slot 14 = 0x05403ddc, pipe configuration 23).
-  The backend now rejects that unsupported table before Mesa's assertion,
-  and the probe disables interactive debugger attachment so a failure exits.
-  The kernel must program the actual Polaris tables before this backend can
-  render; userspace must not replace hardware query data with invented values.
-  Cold recovery to the prior driver and both DMA paths passed after the trial.
+  software substitution.
+- Native WX5100 passes the same 8192 expected pixels using RadeonSI/ACO,
+  including compiled vertex/fragment shaders. GPU completion fences advance
+  from 2 to 10 and EOP vectors from 4 to 20 during the GL checks.
+- After Mesa teardown, all 190 client jobs and 61 legacy GFX checks, both
+  DMA paths and byte-exact H.264/HEVC decoder regressions pass. Combined IRQ
+  counters are 200 completed fences / 400 EOPs, empty ring, zero faults.
+- The kernel must initialize the actual Polaris tables (Haiku ead5796ccc).
+  The backend rejects firmware's unsupported inherited table before Mesa's
+  assertion. Userspace never substitutes invented hardware query values.
+  The probe disables interactive debugger attachment so failures terminate.
+
+This qualifies the initial private EGL clear/shader gate. Texturing/blending,
+multiple contexts, window presentation, applications, broader API coverage,
+performance and general unprivileged command safety remain unqualified.
 
 Configure with platforms=haiku, egl=enabled, glvnd=enabled, glx=disabled,
 gbm=disabled, gallium-drivers=radeonsi,softpipe, vulkan-drivers=[],

@@ -38,6 +38,15 @@ All pixels and output words are independently checked. Both softpipe in QEMU
 and native RadeonSI pass; this covers more commands than the compositor probe
 but is not a complete GLES conformance suite.
 
+native_bglview_probe.cpp / run-bglview.sh compile against Haiku's ordinary
+system GLView.h and link the private EGL-backed libGLVND libGL. QEMU softpipe
+and native RadeonSI pass fixed-function drawing, 12 swaps at three sizes,
+exact GL and app_server pixels, and shared texture lifetime after closing
+the creating view. ResizeTo posts FrameResized asynchronously; the probe waits
+for the window thread to process that notification before drawing. Native
+completion counters advance 966 to 1014 with no IRQ errors. This qualifies
+the tested BGLView API and ABI path, not every OpenGL Kit method or GL feature.
+
 Qualification checkpoint, 2026-10-11:
 - Native GCC 13.3 / LLVM 20.1.8 full EGL + RadeonSI + softpipe build passes.
 - Traditional GNU TLS is required (-mtls-dialect=gnu); no TLSDESC relocations.

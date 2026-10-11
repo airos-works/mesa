@@ -373,6 +373,7 @@ static void amdgpu_pad_gfx_compute_ib(struct amdgpu_winsys *aws, enum amd_ip_typ
    assert(((*num_dw + leave_dw_space) & pad_dw_mask) == 0);
 }
 
+#ifndef __HAIKU__
 static int amdgpu_submit_gfx_nop(struct amdgpu_ctx *ctx)
 {
    struct amdgpu_bo_alloc_request request = {0};
@@ -461,6 +462,7 @@ destroy_ctx:
 
    return r;
 }
+#endif
 
 static void
 amdgpu_ctx_set_sw_reset_status(struct radeon_winsys_ctx *rwctx, enum pipe_reset_status status,
@@ -500,6 +502,26 @@ amdgpu_ctx_query_reset_status(struct radeon_winsys_ctx *rwctx, bool full_reset_o
    if (reset_completed)
       *reset_completed = false;
 
+#ifdef __HAIKU__
+   /* Native files retain their first loss across recovery, including otherwise
+    * idle contexts. No rejected submission is needed to discover that loss.
+    * The native generation reports completion directly; never submit a legacy
+    * Linux-version probe into a permanently lost context. */
+   (void)full_reset_only;
+   uint64_t flags = 0;
+   int r = ac_drm_cs_query_reset_state2(ctx->aws->dev, ctx->ctx_handle, &flags);
+   if (r)
+      mesa_loge("amdgpu: native client reset query failed. (%i)\n", r);
+   else if (flags & AMDGPU_CTX_QUERY2_FLAGS_RESET) {
+      if (ctx->sw_status == PIPE_NO_RESET)
+         ctx->sw_status = PIPE_UNKNOWN_CONTEXT_RESET;
+      if (reset_completed)
+         *reset_completed = !(flags & AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS);
+   }
+   if (needs_reset)
+      *needs_reset = ctx->sw_status != PIPE_NO_RESET;
+   return ctx->sw_status;
+#else
    /* Return a failure due to a GPU hang. */
    uint64_t flags;
 
@@ -552,6 +574,7 @@ amdgpu_ctx_query_reset_status(struct radeon_winsys_ctx *rwctx, bool full_reset_o
    if (needs_reset)
       *needs_reset = false;
    return PIPE_NO_RESET;
+#endif
 }
 
 /* COMMAND SUBMISSION */

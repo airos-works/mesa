@@ -88,8 +88,20 @@ static void drain_test(Drain& a)
    require(wait_for_thread(t, &result) == B_OK && a.done && !a.result, "lifetime operation drains and joins");
 }
 static void fault_test(ac_drm_device *d, int fd, uint32_t a, uint32_t b,
-                       Buffer& ib, Buffer& data, Buffer& f, uint32_t signal, uint32_t failed)
+                       Buffer& ib, Buffer& data, Buffer& f, uint32_t signal, uint32_t failed, bool recover)
 {
+   ac_drm_device *idle = nullptr; int idle_fd = -1; uint32_t idle_ctx = 0;
+   Buffer idle_buffer = {};
+   if (recover) {
+      idle_fd = open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR); uint32_t major, minor;
+      require(idle_fd >= 0 && !ac_drm_device_initialize(idle_fd, false, &major, &minor, &idle),
+         "initialize independent innocent device before fault");
+      require(!ac_drm_cs_ctx_create2(idle, AMDGPU_CTX_PRIORITY_NORMAL, &idle_ctx), "idle context");
+      idle_buffer = buffer(idle, 0x300000000, 65536);
+      for (unsigned i = 0; i < idle_buffer.bytes / 4; i++) {
+         require(idle_buffer.cpu[i] == 0, "fresh idle BO is zero"); idle_buffer.cpu[i] = 0x12510000 ^ i;
+      }
+   }
    // Alias only our own buffer read-only; no unowned GPU address is accessed.
    require(!ac_drm_bo_va_op_raw(d, data.id, 0, data.bytes, data.va + 0x100000,
       AMDGPU_VM_PAGE_READABLE, AMDGPU_VA_OP_MAP), "owned read-only alias");
@@ -115,9 +127,10 @@ static void fault_test(ac_drm_device *d, int fd, uint32_t a, uint32_t b,
    require(!p->wait(p, &signal, 1, os_time_get_nano(), 0, nullptr), "prior sync stays successful");
    require(p->wait(p, &failed, 1, os_time_get_nano(), 0, nullptr) == -EIO, "failed sync reports device loss");
    uint64_t flags = 0; require(!ac_drm_cs_query_reset_state2(d, a, &flags)
-      && (flags & AMDGPU_CTX_QUERY2_FLAGS_RESET), "Mesa observes device loss");
+      && flags == (AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS),
+      "Mesa observes persistent loss with reset not yet complete");
    // Drain all canceled jobs before inspecting the final CPU fence values.
-   require(!ac_drm_cs_ctx_free(d, a) && !ac_drm_cs_ctx_free(d, b), "faulted contexts drain");
+   require(!ac_drm_cs_ctx_free(d, b) && (recover || !ac_drm_cs_ctx_free(d, a)), "faulted contexts drain");
    require(((uint64_t*)f.cpu)[0] == 1 && ((uint64_t*)f.cpu)[1] == 0,
       "failed/canceled work cannot publish a successful CPU fence");
    for (unsigned i = 0; i < data.bytes / 4; ++i) {
@@ -131,6 +144,77 @@ static void fault_test(ac_drm_device *d, int fd, uint32_t a, uint32_t b,
       && after.vm_faults == before.vm_faults + 1 && after.waits == before.waits + 2,
       "only gate and fault reach GPU; independent VM fault observed");
    int monitor = open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR); require(monitor >= 0, "quarantine monitor");
+   if (recover) {
+      auto state = request<amdgpu_recovery_info>();
+      require(!ioctl(monitor, AMDGPU_RECOVERY_INFO, &state, sizeof(state)) && !state.pending
+         && state.live_handles && state.live_vms == 2 && !state.buffers && !state.vms,
+         "two terminal live Mesa devices with all BOs/VMs retained");
+      uint64_t generation = state.generation;
+      state = request<amdgpu_recovery_info>();
+      require(!ioctl(monitor, AMDGPU_GFX_RECOVER_LIVE, &state, sizeof(state)), "one explicit live reset request");
+      printf("Mesa live recovery status %#x stage %u generation %llu -> %llu\n",
+         unsigned(state.status), state.stage, (unsigned long long)generation, (unsigned long long)state.generation);
+      require(state.status == B_OK && state.stage == 7 && state.generation == generation + 1
+         && !state.reclaimed_vram && !state.reclaimed_ram && state.live_vms == 2,
+         "one successful reset retains all live Mesa allocations");
+      auto live_mem = request<amdgpu_memory_info>(); auto live_ram = request<amdgpu_gart_info>();
+      require(!ioctl(monitor, AMDGPU_MEMORY_INFO, &live_mem, sizeof(live_mem))
+         && !ioctl(monitor, AMDGPU_GART_INFO, &live_ram, sizeof(live_ram))
+         && live_mem.allocated_bytes == memory.allocated_bytes && live_ram.allocated_bytes == ram.allocated_bytes,
+         "live Mesa allocations remain charged across reset");
+      for (unsigned round = 0; round < 2; round++) {
+         require(!ac_drm_cs_query_reset_state2(d, a, &flags) && flags == AMDGPU_CTX_QUERY2_FLAGS_RESET,
+            "faulting Mesa context reports completed reset while remaining lost");
+         // This device never submitted and did not query the fault before reset.
+         require(!ac_drm_cs_query_reset_state2(idle, idle_ctx, &flags) && flags == AMDGPU_CTX_QUERY2_FLAGS_RESET,
+            "previously unobserved innocent context loss survives global fault clearing");
+         uint32_t id = 0;
+         require(ac_drm_cs_ctx_create2(idle, AMDGPU_CTX_PRIORITY_NORMAL, &id) == -EIO && !id,
+            "lost native device cannot create a replacement context");
+         fence_status(d, a, 1, 0, 0, true);
+         uint32_t expired = 123;
+         require(ac_drm_cs_query_fence_status(d, a, AMDGPU_HW_IP_GFX, 0, 0, 2, 0, 0, &expired) == -EIO
+            && !expired && ((uint64_t*)f.cpu)[0] == 1 && ((uint64_t*)f.cpu)[1] == 0,
+            "old failed context and CPU fences remain failed after reset");
+         require(!p->wait(p, &signal, 1, os_time_get_nano(), 0, nullptr)
+            && p->wait(p, &failed, 1, os_time_get_nano(), 0, nullptr) == -EIO,
+            "old successful and failed sync results persist after reset");
+         for (unsigned i = 0; i < idle_buffer.bytes / 4; i++)
+            require(idle_buffer.cpu[i] == (0x12510000u ^ i), "every idle client BO word stays unchanged");
+         if (round == 0) {
+            int next_fd = open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR); ac_drm_device *next = nullptr;
+            uint32_t major, minor, context;
+            require(next_fd >= 0 && !ac_drm_device_initialize(next_fd, false, &major, &minor, &next)
+               && !ac_drm_cs_ctx_create2(next, AMDGPU_CTX_PRIORITY_NORMAL, &context), "fresh recovered Mesa device/context");
+            auto next_ib = buffer(next, 0x300000000, 65536), next_data = buffer(next, 0x300010000, 65536);
+            auto next_fence = buffer(next, 0, 4096);
+            require(submit(next, context, next_ib, next_data, next_fence, 0, 0, 0, false) == 1, "fresh Mesa work");
+            fence_status(next, context, 1, 5000000000, 0, true);
+            for (unsigned i = 0; i < next_data.bytes / 4; i++) {
+               const uint32_t values[] = {0x51000000, ~0x51000000u, 0, 0x51005100};
+               require(next_data.cpu[i] == (i >= 1024 && i < 1028 ? values[i - 1024] : 0),
+                  "fresh zeroed Mesa buffer, exact result and all guards");
+            }
+            require(!ac_drm_cs_query_reset_state2(next, context, &flags) && !flags, "fresh context stays healthy");
+            ac_drm_device_deinitialize(next); close(next_fd);
+         }
+      }
+      require(!ac_drm_cs_ctx_free(d, a) && !ac_drm_cs_ctx_free(idle, idle_ctx), "lost contexts still clean up");
+      ac_drm_device_deinitialize(idle); close(idle_fd);
+      ac_drm_device_deinitialize(d); close(fd);
+      state = request<amdgpu_recovery_info>(); after = request<amdgpu_irq_info>();
+      require(!ioctl(monitor, AMDGPU_RECOVERY_INFO, &state, sizeof(state))
+         && !state.live_handles && !state.live_vms && !state.buffers && !state.vms
+         && !state.quarantined_vram && !state.quarantined_ram && state.status == B_OK
+         && !ioctl(monitor, AMDGPU_IRQ_INFO, &after, sizeof(after))
+         && after.status == B_OK && after.completed_fences == 2 && after.waits == 2
+         && !after.vm_faults && !after.privileged_faults && !after.unknown && !after.overflows,
+         "old/fresh Mesa devices close with no quarantine and two healthy post-reset hardware jobs");
+      close(monitor);
+      puts("PASS: live Mesa reset, persistent faulting and previously unobserved innocent context loss,"
+         " reset completion, old success/failure fences and syncs, retained guards, fresh rendering and cleanup");
+      return;
+   }
    ac_drm_device_deinitialize(d); close(fd);
    auto retained = request<amdgpu_memory_info>(); auto retained_ram = request<amdgpu_gart_info>();
    require(!ioctl(monitor, AMDGPU_MEMORY_INFO, &retained, sizeof(retained))
@@ -145,7 +229,8 @@ int main(int argc, char **argv)
    disable_debugger(1);
    bool missing = argc == 2 && !strcmp(argv[1], "--expect-no-device");
    bool unprivileged = argc == 2 && !strcmp(argv[1], "--unprivileged");
-   bool fault = argc == 2 && !strcmp(argv[1], "--fault");
+   bool recover = argc == 2 && !strcmp(argv[1], "--live-recovery");
+   bool fault = recover || (argc == 2 && !strcmp(argv[1], "--fault"));
    require(argc == 1 || missing || unprivileged || fault, "arguments");
    if (unprivileged) require(setgid(65534) == 0 && setuid(65534) == 0, "drop privilege");
    setenv("HAIKU_AMDGPU_ASYNC", "1", 1); setenv("HAIKU_AMDGPU_VALIDATE_COMMANDS", "1", 1);
@@ -166,7 +251,7 @@ int main(int argc, char **argv)
       && !ac_drm_cs_ctx_create2(d, AMDGPU_CTX_PRIORITY_NORMAL, &b), "create contexts");
    auto p = ac_drm_device_get_sync_provider(d);
    require(!p->create(p, 0, &signal) && !p->create(p, 0, &reset) && !p->create(p, 0, &destroyed), "create syncs");
-   if (fault) { fault_test(d, fd, a, b, ib, data, f, signal, reset); return 0; }
+   if (fault) { fault_test(d, fd, a, b, ib, data, f, signal, reset, recover); return 0; }
    gate = data.cpu;
    require(submit(d, a, ib, data, f, 0, signal, 0, true) == 1, "first context sequence");
    require(submit(d, b, ib, data, f, 8, reset, 1, false) == 1, "independent context sequence");

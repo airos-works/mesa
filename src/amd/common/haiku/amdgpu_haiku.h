@@ -46,7 +46,50 @@ enum {
 	AMDGPU_IRQ_INFO,
 	AMDGPU_RENDER_INFO,
 	AMDGPU_GFX_SUBMIT_COPY,
-	AMDGPU_GFX_QUEUE_COPY
+	AMDGPU_GFX_QUEUE_COPY,
+	AMDGPU_SHADER_MEMORY_INFO,
+	AMDGPU_DIAGNOSTIC_RAM_PAGE,
+	AMDGPU_CREATE_DIAGNOSTIC_RAM_BUFFER,
+	AMDGPU_GFX_GDS_PROBE_COPY,
+	AMDGPU_GWS_INFO,
+	AMDGPU_OA_INFO,
+	AMDGPU_RECOVERY_INFO,
+	AMDGPU_GFX_RECOVER,
+	AMDGPU_GFX_RECOVER_LIVE,
+	AMDGPU_CLIENT_STATUS
+};
+
+// Root-only recovery bring-up. INFO only observes retained bookkeeping.
+// RECOVER requires a terminal graphics fault and no live GPU resources or
+// work. It never retries a failed hardware reset. flags/reserved must be zero.
+// RECOVER_LIVE additionally permits lost graphics/DMA clients to retain their
+// BOs and VMs. It never rebinds those VMs or recycles live backing allocations.
+// Live video sessions, executing work and other-engine faults still exclude it.
+struct amdgpu_recovery_info {
+	uint32 version, size, flags, reserved;
+	int32 status;
+	uint32 stage;
+	uint64 generation;
+	uint32 grbm_reset, srbm_reset;
+	uint32 before[4], after[4]; // GRBM, GRBM2, SRBM, combined VM fault status
+	uint64 quarantined_vram, quarantined_ram, reclaimed_vram, reclaimed_ram;
+	uint32 buffers, vms, videos, live_handles, live_vms, live_videos, pending, reserved_out;
+};
+
+// Ordinary, owning O_RDWR client query; no GPU work or memory addresses.
+// Input flags/reserved must be zero. The first device fault permanently loses
+// every open client, including clients with no failed asynchronous fence.
+// RESET_COMPLETED means a successful device recovery followed that loss;
+// it does not make the old client usable. Fresh work needs a fresh open file.
+enum {
+	AMDGPU_CLIENT_LOST = 1,
+	AMDGPU_CLIENT_RESET_COMPLETED = 2
+};
+struct amdgpu_client_status {
+	uint32 version, size, flags, reserved;
+	int32 status, device_status;
+	uint64 generation, loss_generation;
+	uint64 submitted, completed, failed_fence;
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO
@@ -117,6 +160,50 @@ struct amdgpu_gfx_submit {
 // without starting/submitting graphics. Zero flags retain the raw lab interface.
 #define AMDGPU_GFX_VALIDATE_COMMANDS 1u
 
+// Root-only GDS qualification, using amdgpu_gfx_submit with a privately copied,
+// always-validated outer IB. flags is exactly one of the modes below, not the
+// ordinary submission flags. Fixed byte ranges only; no caller-selected MMIO.
+// The driver owns GDS and ordinary clients have zero allocation. The probe
+// temporarily leases a window to VMID2 for one synchronous job, then revokes
+// it on healthy retirement. GWS-only modes leave GDS/OA disabled. These contents
+// are shared across probe jobs, not a per-client storage API. Faults retain
+// the usual terminal quarantine and require recovery before another probe.
+enum {
+	AMDGPU_GDS_PROBE_FULL = 0, // base 0, size 4096; initialize/check owned guards
+	AMDGPU_GDS_PROBE_SLICE = 1, // base 1024, size 256
+	AMDGPU_GDS_PROBE_NONE = 2, // base 0, size 0; ordinary client policy
+	AMDGPU_GDS_PROBE_GWS_FULL = 3, // GWS base 0, count 16; GDS/OA disabled
+	AMDGPU_GDS_PROBE_GWS_SLICE = 4, // GWS base 8, count 2; GDS/OA disabled
+	// OA modes reset this ring's ME/GDS wave IDs using the inherited
+	// GDS_COMPUTE_MAX_WAVE_ID, via a trusted same-value PM4 prefix.
+	AMDGPU_GDS_PROBE_OA_RESET = 5, // reset only; GDS/GWS/OA disabled
+	AMDGPU_GDS_PROBE_OA_FULL = 6, // GDS 0/4096; OA mask 0xffff
+	AMDGPU_GDS_PROBE_OA_SLICE = 7, // GDS 0/4096; OA resource mask 0x30
+	AMDGPU_GDS_PROBE_OA_NONE = 8, // GDS 0/4096; OA mask 0
+	AMDGPU_GDS_PROBE_OA_NOGDS = 9, // GDS disabled; OA mask 0xffff
+	AMDGPU_GDS_PROBE_LAST = AMDGPU_GDS_PROBE_OA_NOGDS
+};
+
+// Root-only bounded observation of all 64 driver-owned GWS resources. Requires
+// an initialized, healthy idle graphics engine. No resource values are written;
+// the fixed GDS_GWS_RESOURCE_CNTL index selector is restored after readback.
+// flags/reserved must be zero. gws_vmid2 reports the current allocation.
+struct amdgpu_gws_info {
+	uint32 version, size, flags, reserved;
+	uint32 selector_before, selector_after, gws_vmid2, resource_count;
+	uint32 resources[64];
+};
+
+// Root-only idle observation. Reads the 16 owned OA counters, addresses and
+// ring sizes; restores the fixed index selector. Does not write OA state or
+// reset wave counters. flags/reserved must be zero.
+struct amdgpu_oa_info {
+	uint32 version, size, flags, reserved;
+	uint32 selector_before, selector_after, oa_vmid0, oa_vmid2;
+	uint32 gds_base, gds_size, max_wave_id, resource_count;
+	uint32 counters[16], addresses[16], ring_sizes[16];
+};
+
 // Root-only asynchronous copied submission. Captures/optionally validates the
 // complete outer IB before returning. Queued jobs retain the client VM and all
 // bindings; VM operations return B_BUSY until this file's graphics jobs retire.
@@ -127,6 +214,8 @@ struct amdgpu_gfx_submit {
 // fence uses the same ordered file-local sequence and WAIT_FENCE as SUBMIT_DMA.
 // A successful enqueue is not GPU completion. Closing retains pending work;
 // terminal GPU errors fail outstanding fences and quarantine device storage.
+// A file with a failed fence remains lost after device recovery. Old waits and
+// resource cleanup stay valid; new allocations, VMs and work require reopening.
 struct amdgpu_gfx_queue {
 	uint32 version, size;
 	uint64 address;
@@ -137,7 +226,8 @@ struct amdgpu_gfx_queue {
 
 // Read-only observation after client engine startup; this does not initialize
 // graphics or alter interrupt routing. reserved must be zero. No DMA address
-// or writable ring mapping is exposed. Counts cover this device's lifetime.
+// or writable ring mapping is exposed. Counts cover the current interrupt
+// epoch; successful recovery rearms IH and advances RECOVERY_INFO.generation.
 struct amdgpu_irq_info {
 	uint32 version, size;
 	uint32 enabled, msi, vector, ring_bytes;
@@ -181,6 +271,34 @@ struct amdgpu_render_info {
 	uint32 max_mappings, max_vm_clients, page_size, max_ib_bytes;
 	uint32 ib_address_alignment, ib_size_alignment, max_buffers, reserved_out;
 };
+
+// Root-only, bounded diagnostic for the leased graphics VMID2. Requires an
+// already started engine and idle queues. No caller-selected register access
+// or translation changes; the SRBM bank selector is restored after reading.
+// Raw ATC configuration is evidence, not a claim that ATC accesses are safe.
+struct amdgpu_shader_memory_info {
+	uint32 version, size, flags, reserved;
+	uint32 vmid, selector_before, selector_after, reserved_out;
+	uint32 sh_mem_config, sh_mem_bases, sh_mem_ape1_base, sh_mem_ape1_limit;
+	uint32 gds_base, gds_size, gws, oa;
+	uint32 atc_ats_control, atc_ats_debug, atc_vmid_pasid, atc_l1_address_offset;
+	uint32 atc_aperture[2][4]; // low, high, access mode, VMID mask
+};
+
+// Root-only lab diagnostic: physical backing of one aligned, wired RAM page
+// in this file's live buffer handle. No foreign handles, VRAM or arbitrary
+// kernel addresses. The caller must keep the handle/mapping alive throughout
+// its experiment; ordinary allocation/VM APIs never expose physical addresses.
+// This permits translation probes with owned targets on both possible paths.
+struct amdgpu_diagnostic_ram_page {
+	uint32 version, size;
+	uint64 handle, offset, physical_address;
+	uint32 flags, reserved;
+};
+// CREATE_DIAGNOSTIC_RAM_BUFFER uses amdgpu_buffer, requires root and an
+// initialized device, and accepts exactly 8192 bytes with reserved=0. Its
+// wired backing is restricted to [4 GiB,64 GiB), outside VMID0's GART/PCI
+// apertures for the qualified board. Normal buffer lifetime/zeroing applies.
 
 // Read-only DCE 11.2 observation, available without starting any GPU engine.
 // Register reads are sequential, not an atomic modeset or vblank snapshot.

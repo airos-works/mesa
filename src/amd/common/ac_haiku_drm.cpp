@@ -630,6 +630,11 @@ int ac_drm_cs_ctx_create2(ac_drm_device *d, uint32_t priority, uint32_t *id)
 {
    std::lock_guard<std::mutex> lock(d->mutex);
    if (priority != AMDGPU_CTX_PRIORITY_NORMAL || !d->next_context) return -ENOTSUP;
+   auto state = request<amdgpu_client_status>();
+   int err = native_call(d, AMDGPU_CLIENT_STATUS, state);
+   if (err) return err;
+   if (state.flags & AMDGPU_CLIENT_LOST) { d->lost = true; d->changed.notify_all(); }
+   if (d->lost) return -EIO;
    *id = d->next_context++; d->contexts.emplace(*id, ContextState{}); return 0;
 }
 int ac_drm_cs_ctx_free(ac_drm_device *d, uint32_t id)
@@ -642,10 +647,15 @@ int ac_drm_cs_query_reset_state2(ac_drm_device *d, uint32_t id, uint64_t *flags)
 {
    std::lock_guard<std::mutex> lock(d->mutex);
    if (!d->contexts.count(id)) return -EINVAL;
-   auto r = request<amdgpu_memory_info>(); int err = native_call(d, AMDGPU_MEMORY_INFO, r);
+   if (!flags) return -EINVAL;
+   auto r = request<amdgpu_client_status>(); int err = native_call(d, AMDGPU_CLIENT_STATUS, r);
    if (err) return err;
-   if (r.faulted) { d->lost = true; d->changed.notify_all(); }
-   *flags = d->lost ? AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS : 0;
+   if (r.flags & AMDGPU_CLIENT_LOST) { d->lost = true; d->changed.notify_all(); }
+   // Global fault clearing cannot revive this native file. A successful later
+   // generation completes the reset while this device/context stays lost.
+   *flags = d->lost ? AMDGPU_CTX_QUERY2_FLAGS_RESET : 0;
+   if (d->lost && !(r.flags & AMDGPU_CLIENT_RESET_COMPLETED))
+      *flags |= AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS;
    return 0;
 }
 int ac_drm_cs_query_fence_status(ac_drm_device *d, uint32_t id, uint32_t type, uint32_t instance,

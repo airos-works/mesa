@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -57,6 +58,7 @@ struct ac_drm_device {
    void *command_cpu = nullptr;
    area_id command_area = -1;
    bool lost = false;
+   unsigned trace_remaining = 0, trace_sequence = 0;
 };
 
 template<class T> static T request()
@@ -80,6 +82,34 @@ template<class T> static int native_call(ac_drm_device *d, uint32_t op, T& value
 static bool range(uint64_t offset, uint64_t bytes, uint64_t size)
 { return offset <= size && bytes <= size - offset; }
 static bool pow2(uint64_t value) { return value && !(value & (value - 1)); }
+static unsigned trace_limit()
+{
+   const char *value = getenv("HAIKU_AMDGPU_TRACE_IB");
+   if (!value || !*value) return 0;
+   char *end;
+   unsigned long count = strtoul(value, &end, 10);
+   return !*end && count <= 256 ? count : 0;
+}
+static void trace_ib(ac_drm_device *d, uint32_t context, unsigned dwords)
+{
+   if (!d->trace_remaining) return;
+   d->trace_remaining--;
+   // Capture the exact flattened preamble/main/padding that the ioctl sees.
+   // RadeonSI's AMD_DEBUG=ib prints only its current command stream, which
+   // omits the separately attached preamble. This is opt-in and bounded.
+   auto words = static_cast<const uint32_t*>(d->command_cpu);
+   flockfile(stderr);
+   fprintf(stderr, "amdgpu: native IB begin fd %d context %u capture %u dwords %u\n",
+           d->fd, context, ++d->trace_sequence, dwords);
+   for (unsigned start = 0; start < dwords; start += 8) {
+      fprintf(stderr, "amdgpu: native IB data %05u:", start);
+      for (unsigned i = start; i < std::min(start + 8, dwords); ++i)
+         fprintf(stderr, " %08x", words[i]);
+      fputc('\n', stderr);
+   }
+   fputs("amdgpu: native IB end\n", stderr);
+   funlockfile(stderr);
+}
 static amdgpu_bo *lookup(ac_drm_device *d, uint32_t id)
 {
    auto it = d->bos.find(id);
@@ -200,6 +230,7 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    d->sync.finalize = sync_finalize;
    *major = 0; *minor = AMDGPU_HAIKU_ABI_VERSION; // Native ABI, not a Linux DRM version.
    *out = d;
+   d->trace_remaining = trace_limit();
    fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root synchronous prototype, %s IB\n",
            *minor, d->info.active_cus,
            d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT ? "kernel-copied" : "mapped");
@@ -582,6 +613,7 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
    for (; cursor < padded; cursor += 4) *(uint32_t*)((char*)d->command_cpu + cursor) = 0x80000000;
    for (auto id : signals) d->syncs[id] = false;
    __sync_synchronize();
+   trace_ib(d, ctx, padded / 4);
    const bool copied = d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT;
    auto submit = request<amdgpu_gfx_submit>();
    submit.address = copied ? (uintptr_t)d->command_cpu : d->info.address_start;

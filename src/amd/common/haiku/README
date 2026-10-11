@@ -31,6 +31,13 @@ framing and reports observed packet and direct SET register coverage as JSON.
 Its optional --export directory writes little-endian .ib files for Mesa's
 ac_ib_parser polaris10. Neither tool establishes a safe command allowlist.
 
+native_gles31_probe.cpp / run-gles31.sh exercise indexed, instanced and
+indirect draws; UBO updates; depth/stencil and positive/negative queries;
+transform feedback with guarded ranges; and direct/indirect SSBO compute.
+All pixels and output words are independently checked. Both softpipe in QEMU
+and native RadeonSI pass; this covers more commands than the compositor probe
+but is not a complete GLES conformance suite.
+
 Qualification checkpoint, 2026-10-11:
 - Native GCC 13.3 / LLVM 20.1.8 full EGL + RadeonSI + softpipe build passes.
 - Traditional GNU TLS is required (-mtls-dialect=gnu); no TLSDESC relocations.

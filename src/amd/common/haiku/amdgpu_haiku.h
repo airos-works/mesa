@@ -57,15 +57,17 @@ enum {
 	AMDGPU_GFX_RECOVER,
 	AMDGPU_GFX_RECOVER_LIVE,
 	AMDGPU_CLIENT_STATUS,
-	AMDGPU_RECOVERY_POLICY
+	AMDGPU_RECOVERY_POLICY,
+	AMDGPU_UVD_TIMEOUT_TEST
 };
 
 // Root-only recovery bring-up. INFO only observes retained bookkeeping.
-// RECOVER requires a terminal graphics fault and no live GPU resources or
+// RECOVER requires a terminal GFX/UVD fault and no live GPU resources or
 // work. It never retries a failed hardware reset. flags/reserved must be zero.
-// RECOVER_LIVE additionally permits lost graphics/DMA clients to retain their
-// BOs and VMs. It never rebinds those VMs or recycles live backing allocations.
-// Live video sessions, executing work and other-engine faults still exclude it.
+// RECOVER_LIVE permits lost clients to retain BOs, VMs and video storage. It
+// never revives a client or recycles live backing. A UVD reset invalidates all
+// old firmware sessions. Executing work and SDMA faults still exclude reset.
+// stage 7 means success; stages 8..10 cover UVD reset/reload/proof.
 struct amdgpu_recovery_info {
 	uint32 version, size, flags, reserved;
 	int32 status;
@@ -93,9 +95,9 @@ struct amdgpu_client_status {
 	uint64 submitted, completed, failed_fence;
 };
 
-// Root-only automatic GFX recovery policy/query. Enabled by default. A first
+// Root-only automatic GFX/UVD recovery policy/query. Enabled by default. A first
 // terminal fault schedules one worker attempt after execution/queues drain;
-// live video and other-engine faults remain unsupported and retained. A failed
+// SDMA fault remains unsupported and retained. A failed
 // attempt never retries. flags=0 observes; SET_POLICY accepts enabled=0/1 only
 // on a healthy idle device and cannot rearm an existing fault. All reserved
 // input must be zero. Counters describe automatic attempts, not manual resets.
@@ -106,6 +108,17 @@ struct amdgpu_recovery_policy {
 	int32 status;
 	uint32 reserved_out;
 	uint64 attempts, successes;
+};
+
+// Root-only, idle, initialized UVD qualification. Disable ring fetch, submit a
+// harmless private register/fence IB, and take the normal bounded timeout path.
+// No caller addresses or commands. flags/reserved must be zero; status and the
+// captured ring/fence state describe the fault before any automatic recovery.
+struct amdgpu_uvd_timeout_test {
+	uint32 version, size, flags, reserved;
+	int32 status;
+	uint32 sequence, fence, rptr, wptr, uvd_status;
+	uint64 elapsed_us;
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO

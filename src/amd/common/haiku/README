@@ -322,3 +322,27 @@ closed-resource reset and 1,106 further jobs all pass. Final generation12,
 Mesa423/820 backups remain. Evidence: video-recovery-manifest.json beside the
 previous manifests. Application renderer recovery integration, actual other-
 engine fault recovery, shader isolation, display and full release remain open.
+
+UVD recovery checkpoint (2026-10-11): kernel 8010d0fc32 / f8bac855 restarts
+faulted UVD firmware and invalidates old decoder sessions while preserving
+live backing and permanent client loss. The copied header adds the root-only
+48-byte UVD timeout diagnostic; existing ABI layouts and Mesa runtime
+d99455c / 42352938 are unchanged. Native standalone and initialized-GFX UVD
+timeouts, mixed live/closed H264/HEVC Main/Main10 ownership, and explicit
+recovery after a graphics VM fault observed by active UVD all pass. A
+privileged graphics fault correctly leaves UVD healthy and needs GFX-only
+recovery. The first kernel's cold-clock precondition rejected firmware restart;
+terminal quarantine and both manual retry refusals pass before the corrected
+kernel verifies the preserved playback clocks. No failed reset is retried.
+
+Pending decoder ownership,64 concurrent exact Main10 frames,mixed queues,
+robust EGL auto recovery and legacy explicit recovery pass on the corrected
+boot. The full1106-job regression and both DMA paths pass. Two BGLView screen
+checks capture the mouse cursor (259pixels) despite correct GL readback;
+moving it outside the views restores exact screen pixels on the same boot.
+Those partial runs add42healthy jobs. Final generation13:1150completed/waits,
+2300EOP,1512IRQ,empty0x8fc0,zeroerrors,no live resources/quarantine; automatic
+policy enabled8attempts/8successes. Same-hash kernelbackup f8 and older4d/f2/
+b64/73,Mesa423/820 remain. Evidence: uvd-recovery-manifest.json beside prior
+manifests. SDMA recovery,app renderer recovery,remaining shader isolation,
+eviction,native display,system defaults and final full installation remain open.

@@ -47,8 +47,11 @@ context, CPU and binary-sync fences with real GPU WAIT_REG_MEM gates, copied
 source replacement, relative/absolute deadlines, sync reset/destruction,
 and BO/VM/context/device lifetime. It has --expect-no-device and --unprivileged
 gates. Run after cross-build/QEMU gates, before the actual queued GL suite.
-This implementation is under qualification; no application queue results
-are claimed here yet.
+The --fault mode attempts a write through an owned read-only alias with
+later jobs queued behind it. Every failed/canceled context and binary fence
+reports device loss, CPU fences stay at their prior successful values, buffer
+guards remain intact, and teardown joins the worker while the kernel retains
+quarantined GPU storage. Recovery still requires a cold boot.
 
 Device loss is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
 sync, sparse mapping, migration and reset are not advertised. Video decoding
@@ -197,3 +200,32 @@ pass with checked composition and independent hardware decode counts. Final
 DMA/VM checks reach 43457 completed jobs with no GPU faults. Private runtime
 only; system graphics defaults and the root gate remain unchanged. Evidence
 is x399/evidence/wx5100/mesa-native/checked-command-manifest.json outside git.
+
+Queued submission checkpoint (2026-10-11): Mesa 207f090 / library 82098de9,
+fault helper b4ef1ba, kernel 3c1d83b21a / cefb183c. Host cross compilation and
+native GCC 13.3 linking pass. QEMU passes automatic/forced software, explicit
+absent-device failure and GLES 3.1; its previous private library is restored.
+The direct native seven-job probe passes pending and completed fences,
+deadlines, sync generations, source replacement and resource lifetime.
+Queued checked EGL/BGLView/GLES 3.1/compositor/window probes pass 385 jobs with
+exact outputs. The synchronous comparison (25), concurrent UVD (65), bounded
+VM (131) and both DMA paths pass, ending at 1,826 healthy completions. The
+separate four-job fault trial passes all three affected/canceled fences,
+prior success and quarantine after close; the actual VM fault is 0x5048010.
+
+Cold recovery initially reports 2,205 wrong BGLView screen pixels, while GL
+readback is correct. Reproduction with the diagnostic capture identifies a
+floating Network Status panel covering exactly 63 by 35 pixels of the view.
+Closing that panel on the same boot restores every screen pixel. This is a
+visible-screen test: clear overlapping panels before running it. The optional
+HAIKU_AMDGPU_CAPTURE_FAILURE path preserves a PPM of any failed screen capture.
+
+The first queued Summit HEVC 900-frame run drops 80 frames. Kernel df29063bad
+fixes a queue integration regression: video's SDMA wait still counted pending
+graphics, serializing decode behind the new queue. A gated regression proves
+the old kernel blocks video, while the fixed kernel permits complete exact
+decode during blocked graphics and still excludes video behind queued DMA.
+On fixed kernel cb8672d6, all queue/Mesa/VM/shader/DMA/media regression checks
+pass at 1,135 healthy completions. Browser playback qualification continues;
+no sustained queued playback result is claimed yet. The default remains
+synchronous, and qualified afd206fa Mesa and cefb183c kernel backups remain.

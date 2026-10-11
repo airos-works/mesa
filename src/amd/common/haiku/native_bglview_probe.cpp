@@ -104,8 +104,28 @@ static void present(BWindow* window, BGLView* view, unsigned w, unsigned h, unsi
       if (!bad) break;
       snooze(20000);
    } while (system_time() < deadline);
+   if (bad) {
+      fprintf(stderr, "BGLView %ux%u blue %u app_server mismatches %u rect %.0f,%.0f,%.0f,%.0f\n",
+         w, h, blue, bad, rectangle.left, rectangle.top, rectangle.right, rectangle.bottom);
+      // Preserve evidence of occlusion, stale presentation or wrong pixels.
+      // Opt-in path is supplied by the private qualification harness.
+      const char* path = getenv("HAIKU_AMDGPU_CAPTURE_FAILURE");
+      if (path) {
+         FILE* file = fopen(path, "wb");
+         if (file) {
+            fprintf(file, "P6\n%u %u\n255\n", w, h);
+            for (unsigned y = 0; y < h; ++y) {
+               const auto* row = static_cast<const unsigned char*>(image->Bits()) + y * image->BytesPerRow();
+               for (unsigned x = 0; x < w; ++x) {
+                  const unsigned char rgb[] = {row[x * 4 + 2], row[x * 4 + 1], row[x * 4]};
+                  fwrite(rgb, sizeof(rgb), 1, file);
+               }
+            }
+            fclose(file);
+         }
+      }
+   }
    delete image;
-   if (bad) fprintf(stderr, "BGLView %ux%u app_server mismatches %u\n", w, h, bad);
    require(!bad, "all BGLView app_server pixels");
 }
 static void projection(unsigned w, unsigned h)

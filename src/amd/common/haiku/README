@@ -1,5 +1,5 @@
 The native ABI headers are copied verbatim from air/OS Haiku commit
-ef908702af (AMDGPU_HAIKU_ABI_VERSION 1 plus AMDGPU_GFX_SUBMIT_COPY).
+6b9d39ebe6 (ABI version 1, copied submission plus opt-in checked commands).
 They are MIT licensed; changes must stay synchronized with the kernel source.
 
 amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
@@ -21,6 +21,14 @@ fence only after the kernel's private hardware completion fence. When the
 kernel advertises COPY_SUBMIT, it snapshots that outer IB into private,
 read-only GPU storage. Older kernels retain the original mapped-IB path.
 This does not validate nested commands or shaders or remove the root gate.
+HAIKU_AMDGPU_VALIDATE_COMMANDS=1 additionally requests the kernel's initial
+GFX8 command policy. It requires AMDGPU_RENDER_CHECKED_COPY; an older kernel
+must fail native initialization instead of silently sending unchecked commands.
+The policy checks the immutable copy and rejects unsupported packet/control
+paths and direct privileged register state before GPU submission. It is still
+root-only and does not establish general shader/resource isolation or reset.
+The default remains the qualified raw copied path; 0 explicitly disables the
+additional policy, and other nonempty values fail native initialization.
 Device loss is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
 sync, sparse mapping, migration and reset are not advertised. Video decoding
 continues through the separate native media add-on.
@@ -157,3 +165,14 @@ prefix. Hardware mode additionally verifies healthy advancing GPU counters.
 Build native_window_probe.cpp with the same paths plus
 src/gallium/winsys/sw/hgl, then use run-window.sh --hardware or --software.
 The test requires a visible, unobscured desktop and exits after its checks.
+
+Checked-command qualification (2026-10-11): kernel 6b9d39ebe6 / c579f1cd,
+Mesa 0eeec35 / afd206fa. The old kernel rejects the explicit capability
+request with GPU counters unchanged. Candidate QEMU software/missing-device
+checks and GLES 3.1 pass. Native checked basic EGL, public BGLView, GLES 3.1,
+compositor and window outputs pass 385 jobs; concurrent decode/graphics also
+passes. Summit HEVC 900/0, then H.264/AAC and HEVC Main10/AAC 5400/0 each
+pass with checked composition and independent hardware decode counts. Final
+DMA/VM checks reach 43457 completed jobs with no GPU faults. Private runtime
+only; system graphics defaults and the root gate remain unchanged. Evidence
+is x399/evidence/wx5100/mesa-native/checked-command-manifest.json outside git.

@@ -226,6 +226,14 @@ graphics, serializing decode behind the new queue. A gated regression proves
 the old kernel blocks video, while the fixed kernel permits complete exact
 decode during blocked graphics and still excludes video behind queued DMA.
 On fixed kernel cb8672d6, all queue/Mesa/VM/shader/DMA/media regression checks
-pass at 1,135 healthy completions. Browser playback qualification continues;
-no sustained queued playback result is claimed yet. The default remains
-synchronous, and qualified afd206fa Mesa and cefb183c kernel backups remain.
+pass at 1,135 healthy completions. Queued Summit HEVC Main10/AAC passes
+900/0, followed by both H.264/AAC and HEVC Main10/AAC at 5,400 frames with
+zero drops each. Independent hardware decode counts, queued backend logs,
+crash/leftover checks and unchanged contention limits with explicit measured
+GPU-worker attribution pass. Final VM/DMA checks reach 44,699 healthy jobs,
+89,398 EOPs, 59,750 interrupts, empty 0xd360 ring and zero errors. Global
+media add-on 3f28945c is restored. Same-hash cb8672d6 kernel and 82098de9 Mesa
+backups join retained cefb183c/afd206fa checkpoints. The default remains
+synchronous; async=1 is opt-in. Full shader/resource isolation, reset/reuse,
+native display, system defaults and complete release installation remain open.
+The evidence manifest is x399/evidence/wx5100/mesa-native/async-mesa-manifest.json.

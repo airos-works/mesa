@@ -7,10 +7,11 @@ export LIBRARY_PATH="$prefix/lib:%A/lib:/boot/home/config/non-packaged/lib:/boot
 export __EGL_VENDOR_LIBRARY_FILENAMES="$root/50_mesa.json"
 export EGL_LOG_LEVEL=debug
 export MESA_SHADER_CACHE_DIR="$root/cache"
-unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE HAIKU_MALI_DEVICE
+unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE HAIKU_MALI_DEVICE HAIKU_CSF_DEVICE
 case "${1:-}" in
   --software) unset HAIKU_AMDGPU_DEVICE; export GALLIUM_DRIVER=softpipe ;;
+  --auto-hardware) unset HAIKU_AMDGPU_DEVICE GALLIUM_DRIVER ;;
   --hardware) export HAIKU_AMDGPU_DEVICE=/dev/dri/amdgpu/0; unset GALLIUM_DRIVER ;;
-  *) echo 'usage: run-bglview.sh --software | --hardware' >&2; exit 2 ;;
+  *) echo 'usage: run-bglview.sh --software | --hardware | --auto-hardware' >&2; exit 2 ;;
 esac
 exec "$root/native_bglview_probe" "$@"

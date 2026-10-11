@@ -470,11 +470,27 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    bool native_amd_requested = false;
 #ifdef GALLIUM_RADEONSI
    const char *amd_device = getenv("HAIKU_AMDGPU_DEVICE");
+   const bool explicit_amd_device = amd_device && *amd_device;
+   const char *gallium_driver = getenv("GALLIUM_DRIVER");
+   const char *loader_driver = getenv("MESA_LOADER_DRIVER_OVERRIDE");
+   const char *csf_device = getenv("HAIKU_CSF_DEVICE");
+   if (!explicit_amd_device && !disp->Options.ForceSoftware
+       && (!gallium_driver || !*gallium_driver)
+       && (!loader_driver || !*loader_driver)
+       && (!csf_device || !*csf_device)
+       && access("/dev/dri/amdgpu/0", R_OK | W_OK) == 0)
+      amd_device = "/dev/dri/amdgpu/0";
    native_amd_requested = amd_device && *amd_device;
    if (native_amd_requested) {
       hgl_dpy->native_csf = true; // Existing native texture presentation callback.
       if (!disp->Options.ForceSoftware)
          screen = radeonsi_haiku_screen_create(amd_device);
+      if (!screen && !explicit_amd_device) {
+         // An unavailable default device may fall back. An explicit device
+         // remains a strict request, including during EGL's software retry.
+         hgl_dpy->native_csf = false;
+         native_amd_requested = false;
+      }
    }
 #endif
    if (!native_amd_requested) {

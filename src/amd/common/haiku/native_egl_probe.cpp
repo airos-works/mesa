@@ -43,12 +43,25 @@ int main(int argc, char **argv)
    // Keep assertion/crash diagnostics on stderr and let the test terminate
    // instead of waiting indefinitely for the interactive debugger dialog.
    disable_debugger(1);
-   bool hardware = argc == 2 && !strcmp(argv[1], "--hardware");
+   bool autoHardware = argc == 2 && !strcmp(argv[1], "--auto-hardware");
+   bool unprivileged = argc == 2 && !strcmp(argv[1], "--unprivileged-auto-software");
+   bool autoSoftware = unprivileged || (argc == 2 && !strcmp(argv[1], "--auto-software"));
+   bool forcedSoftware = argc == 2 && !strcmp(argv[1], "--forced-software");
+   bool hardware = autoHardware || (argc == 2 && !strcmp(argv[1], "--hardware"));
    bool absent = argc == 2 && !strcmp(argv[1], "--expect-no-device");
-   bool software = argc == 2 && !strcmp(argv[1], "--software");
-   require(hardware || absent || software, "usage: --hardware | --software | --expect-no-device");
+   bool software = autoSoftware || forcedSoftware || (argc == 2 && !strcmp(argv[1], "--software"));
+   require(hardware || absent || software, "usage: --hardware | --software | --expect-no-device | --auto-hardware | --auto-software | --forced-software | --unprivileged-auto-software");
    const char *device = getenv("HAIKU_AMDGPU_DEVICE");
-   require(software ? !device : device && !strcmp(device, "/dev/" AMDGPU_DEVICE_NAME), "explicit renderer selection");
+   require(software || autoHardware ? !device : device && !strcmp(device, "/dev/" AMDGPU_DEVICE_NAME), "renderer selection environment");
+   if (autoHardware || autoSoftware || forcedSoftware)
+      require(!getenv("GALLIUM_DRIVER"), "default Gallium driver selection");
+   if (forcedSoftware)
+      require(getenv("LIBGL_ALWAYS_SOFTWARE") && !strcmp(getenv("LIBGL_ALWAYS_SOFTWARE"), "1"), "forced software selection");
+   if (unprivileged) {
+      require(setgid(65534) == 0 && setuid(65534) == 0 && geteuid() == 65534,
+              "drop credentials before automatic renderer initialization");
+      printf("Automatic renderer selection at UID %u\n", unsigned(geteuid()));
+   }
    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major = 0, minor = 0;
    EGLBoolean initialized = eglInitialize(display, &major, &minor);
@@ -75,7 +88,7 @@ int main(int argc, char **argv)
    require(renderer && (hardware ? (strstr(renderer, "POLARIS10") || strstr(renderer, "polaris10") || strstr(renderer, "WX 5100"))
       && !strstr(renderer, "softpipe") && !strstr(renderer, "llvmpipe") : strstr(renderer, "softpipe") != nullptr),
       "expected hardware/software renderer");
-   int fd = hardware ? open(device, O_RDWR) : -1;
+   int fd = hardware ? open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR) : -1;
    if (hardware) require(fd >= 0, "open independent hardware observer");
    amdgpu_irq_info before = hardware ? interrupts(fd) : amdgpu_irq_info{};
    GLuint texture, framebuffer;

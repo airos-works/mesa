@@ -214,11 +214,13 @@ public:
 int main(int argc, char** argv)
 {
    setvbuf(stdout, nullptr, _IOLBF, 0); disable_debugger(1);
-   hardware = argc == 2 && !strcmp(argv[1], "--hardware");
+   bool automatic = argc == 2 && !strcmp(argv[1], "--auto-hardware");
+   hardware = automatic || (argc == 2 && !strcmp(argv[1], "--hardware"));
    bool software = argc == 2 && !strcmp(argv[1], "--software");
-   require(hardware || software, "usage: --hardware | --software");
+   require(hardware || software, "usage: --hardware | --software | --auto-hardware");
    const char* device = getenv("HAIKU_AMDGPU_DEVICE");
-   require(software ? !device : device && !strcmp(device, "/dev/" AMDGPU_DEVICE_NAME), "explicit BGL renderer");
+   require(software || automatic ? !device : device && !strcmp(device, "/dev/" AMDGPU_DEVICE_NAME), "BGL renderer environment");
+   if (automatic) require(!getenv("GALLIUM_DRIVER"), "default BGL renderer selection");
    ProbeApplication application; application.Run(); status_t status;
    require(wait_for_thread(application.thread, &status) == B_OK && status == B_OK, "join BGLView thread");
 }

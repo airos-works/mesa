@@ -6,8 +6,12 @@ amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
 retained with its MIT license to keep Mesa's internal ac_drm_* argument types.
 The Haiku backend does not link libdrm or issue Linux DRM ioctls.
 
-This is an opt-in, root-only backend under active qualification, selected by
-HAIKU_AMDGPU_DEVICE=/dev/dri/amdgpu/0 in the private EGL build. It does not
+This is a root-only backend under active qualification in a private EGL
+build. With no driver override, EGL tries /dev/dri/amdgpu/0 and falls back if
+the device cannot initialize. GALLIUM_DRIVER, MESA_LOADER_DRIVER_OVERRIDE,
+an explicit HAIKU_CSF_DEVICE, and LIBGL_ALWAYS_SOFTWARE retain their selection
+roles. HAIKU_AMDGPU_DEVICE=/dev/dri/amdgpu/0 explicitly requests AMD and must
+fail if unavailable; it never silently substitutes software. This does not
 install a system renderer or imply unprivileged command safety or reset/reuse.
 
 The backend implements private BOs, 64 GiB file-local GPU address spaces,
@@ -46,6 +50,20 @@ the creating view. ResizeTo posts FrameResized asynchronously; the probe waits
 for the window thread to process that notification before drawing. Native
 completion counters advance 966 to 1014 with no IRQ errors. This qualifies
 the tested BGLView API and ABI path, not every OpenGL Kit method or GL feature.
+
+Automatic selection checkpoint, same day:
+- Native full build and host cross compilation of the EGL driver pass.
+- QEMU passes absent-device automatic fallback, explicit softpipe, forced
+  software, explicit missing-AMD failure, and the BGLView, GLES3.1,
+  compositor and window probes.
+- Native passes EGL and BGLView using no HAIKU_AMDGPU_DEVICE or GALLIUM_DRIVER.
+  Explicit softpipe, LIBGL_ALWAYS_SOFTWARE=1 and automatic selection at UID
+  65534 all render correct software pixels without advancing GPU counters.
+- The full native basic/BGLView/GLES3.1/compositor/window suite advances
+  1014 to 1399 completions and 2028 to 2798 EOPs, without IRQ errors.
+  Private library ee6210e5f1086cbfd1d05417d3e5abe0a5c48a0d01c898fc15ad87b4202af12e
+  is retained with the previous 96975aeb library preserved. System libGL and
+  the system EGL vendor configuration remain unchanged.
 
 Qualification checkpoint, 2026-10-11:
 - Native GCC 13.3 / LLVM 20.1.8 full EGL + RadeonSI + softpipe build passes.
@@ -127,6 +145,10 @@ run-probe.sh expects the executable, prefix/lib and an absolute-path GLVND
 --hardware additionally requires the render-info kernel ABI and healthy MSI
 completion counters to advance during the GL work. A renderer string alone
 does not pass the probe.
+--auto-hardware checks the same GPU results with default device selection;
+--auto-software checks fallback when no device is available. --forced-software
+uses LIBGL_ALWAYS_SOFTWARE, and --unprivileged-auto-software drops to UID/GID
+65534 before EGL initialization to check fallback while the root gate exists.
 
 Build native_compositor_probe.cpp with the same include/library paths and
 -std=c++17. run-compositor.sh selects --hardware or --software in that private

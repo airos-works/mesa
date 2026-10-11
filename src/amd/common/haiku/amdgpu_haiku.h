@@ -58,16 +58,17 @@ enum {
 	AMDGPU_GFX_RECOVER_LIVE,
 	AMDGPU_CLIENT_STATUS,
 	AMDGPU_RECOVERY_POLICY,
-	AMDGPU_UVD_TIMEOUT_TEST
+	AMDGPU_UVD_TIMEOUT_TEST,
+	AMDGPU_SDMA_TIMEOUT_TEST
 };
 
 // Root-only recovery bring-up. INFO only observes retained bookkeeping.
-// RECOVER requires a terminal GFX/UVD fault and no live GPU resources or
+// RECOVER requires a terminal GFX/UVD/SDMA fault and no live GPU resources or
 // work. It never retries a failed hardware reset. flags/reserved must be zero.
 // RECOVER_LIVE permits lost clients to retain BOs, VMs and video storage. It
 // never revives a client or recycles live backing. A UVD reset invalidates all
-// old firmware sessions. Executing work and SDMA faults still exclude reset.
-// stage 7 means success; stages 8..10 cover UVD reset/reload/proof.
+// old firmware sessions. Executing work excludes reset.
+// stage 7 means success; 8..10 cover UVD reset/reload/proof, 11..12 SDMA.
 struct amdgpu_recovery_info {
 	uint32 version, size, flags, reserved;
 	int32 status;
@@ -95,10 +96,9 @@ struct amdgpu_client_status {
 	uint64 submitted, completed, failed_fence;
 };
 
-// Root-only automatic GFX/UVD recovery policy/query. Enabled by default. A first
+// Root-only automatic engine recovery policy/query. Enabled by default. A first
 // terminal fault schedules one worker attempt after execution/queues drain;
-// SDMA fault remains unsupported and retained. A failed
-// attempt never retries. flags=0 observes; SET_POLICY accepts enabled=0/1 only
+// a failed attempt never retries. flags=0 observes; SET_POLICY accepts enabled=0/1 only
 // on a healthy idle device and cannot rearm an existing fault. All reserved
 // input must be zero. Counters describe automatic attempts, not manual resets.
 #define AMDGPU_RECOVERY_SET_POLICY 1u
@@ -118,6 +118,17 @@ struct amdgpu_uvd_timeout_test {
 	uint32 version, size, flags, reserved;
 	int32 status;
 	uint32 sequence, fence, rptr, wptr, uvd_status;
+	uint64 elapsed_us;
+};
+
+// Root-only idle SDMA0 qualification. A private memory poll first succeeds,
+// then waits for a value that will not arrive, taking the normal DMA timeout.
+// No caller addresses/commands; flags/reserved must be zero. Output captures
+// the failed private job before automatic recovery can run.
+struct amdgpu_sdma_timeout_test {
+	uint32 version, size, flags, reserved;
+	int32 status;
+	uint32 sequence, fence, rptr, wptr, engine_status;
 	uint64 elapsed_us;
 };
 

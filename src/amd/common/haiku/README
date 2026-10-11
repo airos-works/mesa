@@ -346,3 +346,21 @@ policy enabled8attempts/8successes. Same-hash kernelbackup f8 and older4d/f2/
 b64/73,Mesa423/820 remain. Evidence: uvd-recovery-manifest.json beside prior
 manifests. SDMA recovery,app renderer recovery,remaining shader isolation,
 eviction,native display,system defaults and final full installation remain open.
+
+SDMA0 recovery checkpoint (2026-10-11): kernel 05c75a689d / c7ca36bf is
+installed; fixture 68d81dcff3 / 3ad01292 qualifies private memory-poll timeouts.
+SDMA resets and proves private fill/copy/guards before initialized graphics
+restarts. Live RAM/VRAM and H264/HEVC storage remains owned; old clients stay
+lost. Closed ownership is reclaimed exactly after recovery. Healthy UVD
+survives. The header appends the root-only 48-byte SDMA timeout diagnostic;
+existing layouts and Mesa runtime d99455c / 42352938 are unchanged.
+
+Standalone automatic/manual DMA, video before graphics startup, initialized
+graphics with Main/Main10, mixed live/closed decoders, and UVD/GFX recovery
+regressions pass on one boot. The full 1106-job suite and both DMA paths pass.
+Final generation 14: 1108 completions/waits,2216 EOP,1675 IRQ,empty0x8a80,
+zero errors,zero live resources/quarantine;automatic enabled10/10 successes.
+Kernel c7 and earlier f8/4d/f2/b64/73,Mesa423/820 backups remain. Evidence:
+sdma-recovery-manifest.json beside prior manifests. DMA failure during decoder
+readback and originating queue failure need direct tests, as do app recovery,
+remaining isolation,eviction,native display,defaults and full installation.

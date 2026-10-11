@@ -217,3 +217,15 @@ if with_tests and not with_platform_windows
     )
   endif
 endif
+
+# Private native backend acceptance probe; does not install a renderer.
+if with_platform_haiku
+  executable(
+    'native_queue_probe',
+    'haiku/native_queue_probe.cpp',
+    include_directories: [inc_include, inc_src, inc_amd, include_directories('haiku')],
+    link_with: [libamd_common],
+    dependencies: [idep_mesautil, dep_thread],
+    install: false,
+  )
+endif

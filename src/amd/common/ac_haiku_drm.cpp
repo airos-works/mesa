@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <new>
@@ -40,6 +41,15 @@ struct amdgpu_bo {
 };
 struct NativeMapping { amdgpu_bo *bo; uint64_t offset, size; uint32_t permissions; };
 struct NativeSync : util_sync_provider { ac_drm_device *dev; };
+struct SyncState { bool signaled; uint64_t generation; };
+struct ContextState { uint64_t submitted = 0, completed = 0; };
+struct PendingSignal { uint32_t id; uint64_t generation; };
+struct PendingJob {
+   uint64_t native_fence = 0, sequence = 0;
+   uint32_t context = 0, fence_bo = 0;
+   uint64_t fence_offset = 0;
+   std::vector<PendingSignal> signals;
+};
 struct amdgpu_va { ac_drm_device *dev; util_vma_heap *heap; uint64_t address, size; };
 struct ac_drm_device {
    int fd = -1;
@@ -50,8 +60,9 @@ struct ac_drm_device {
    NativeSync sync = {};
    std::map<uint32_t, amdgpu_bo*> bos;
    std::map<uint64_t, NativeMapping> mappings;
-   std::map<uint32_t, bool> syncs;
-   std::map<uint32_t, uint64_t> contexts;
+   std::map<uint32_t, SyncState> syncs;
+   std::map<uint32_t, ContextState> contexts;
+   std::deque<PendingJob> pending;
    uint32_t next_bo = 1, next_sync = 1, next_context = 1;
    util_vma_heap low, high;
    amdgpu_buffer commands = {};
@@ -59,6 +70,9 @@ struct ac_drm_device {
    area_id command_area = -1;
    bool lost = false;
    bool checked_commands = false;
+   bool asynchronous = false, closing = false;
+   thread_id completion_thread = -1;
+   unsigned drainers = 0;
    unsigned trace_remaining = 0, trace_sequence = 0;
 };
 
@@ -77,6 +91,8 @@ template<class T> static int native_call(ac_drm_device *d, uint32_t op, T& value
    case B_NOT_ALLOWED: return -EACCES;
    case B_NO_MEMORY: return negative_enomem;
    case B_NOT_SUPPORTED: return -ENOTSUP;
+   case B_WOULD_BLOCK: return -EAGAIN;
+   case B_BUSY: return -EBUSY;
    default: return -EIO;
    }
 }
@@ -116,6 +132,73 @@ static amdgpu_bo *lookup(ac_drm_device *d, uint32_t id)
    auto it = d->bos.find(id);
    return it == d->bos.end() ? nullptr : it->second;
 }
+// A deadline saturates at INT64_MAX, including Mesa's infinite UINT64_MAX.
+static int64_t wait_deadline(uint64_t timeout, bool absolute = false)
+{
+   uint64_t now = absolute ? 0 : os_time_get_nano();
+   return timeout >= INT64_MAX - now ? INT64_MAX : now + timeout;
+}
+static bool wait_change(ac_drm_device *d, std::unique_lock<std::mutex>& lock, int64_t deadline)
+{
+   int64_t now = os_time_get_nano();
+   if (deadline <= now) return false;
+   d->changed.wait_for(lock, std::chrono::nanoseconds(std::min<int64_t>(deadline - now, 1000000000)));
+   return true;
+}
+static void drain_pending(ac_drm_device *d, std::unique_lock<std::mutex>& lock)
+{
+   // Stop new submissions while a VM/BO/context operation drains existing work.
+   // Even after device loss, wait for the worker to consume canceled fences.
+   ++d->drainers;
+   d->changed.wait(lock, [d] { return d->pending.empty(); });
+   --d->drainers;
+   d->changed.notify_all();
+}
+static void publish_completion(ac_drm_device *d, const PendingJob& job)
+{
+   auto context = d->contexts.find(job.context);
+   if (context != d->contexts.end()) context->second.completed = job.sequence;
+   if (job.fence_bo) {
+      auto b = lookup(d, job.fence_bo);
+      // BO destruction and VM changes drain this queue before releasing memory.
+      if (b) __atomic_store_n((uint64_t*)((char*)b->cpu + job.fence_offset), job.sequence, __ATOMIC_RELEASE);
+   }
+   for (auto signal : job.signals) {
+      auto it = d->syncs.find(signal.id);
+      if (it != d->syncs.end() && it->second.generation == signal.generation)
+         it->second.signaled = true;
+   }
+}
+static int32 completion_worker(void *data)
+{
+   auto d = static_cast<ac_drm_device*>(data);
+   std::unique_lock<std::mutex> lock(d->mutex);
+   for (;;) {
+      d->changed.wait(lock, [d] { return d->closing || !d->pending.empty(); });
+      if (d->pending.empty()) return B_OK;
+      auto wait = request<amdgpu_fence_wait>();
+      wait.fence = d->pending.front().native_fence;
+      wait.timeout_us = 1000000;
+      lock.unlock();
+      int result, error;
+      do {
+         result = ioctl(d->fd, AMDGPU_WAIT_FENCE, &wait, sizeof(wait));
+         error = result ? errno : B_OK;
+         // An observation timeout does not cancel or resubmit GPU work.
+      } while (error == B_INTERRUPTED || error == B_TIMED_OUT || error == B_WOULD_BLOCK);
+      lock.lock();
+      if (result || wait.status != B_OK) {
+         d->lost = true;
+         fprintf(stderr, "amdgpu: queued fence %llu failed, wait %#x GPU %#x\n",
+                 (unsigned long long)wait.fence, error, wait.status);
+      } else {
+         // EOP retirement alone is not success: WAIT_FENCE's GPU status wins.
+         publish_completion(d, d->pending.front());
+      }
+      d->pending.pop_front();
+      d->changed.notify_all();
+   }
+}
 static int map_cpu(ac_drm_device *d, amdgpu_bo *bo)
 {
    if (bo->cpu) return 0;
@@ -132,7 +215,7 @@ static int sync_create(util_sync_provider *p, uint32_t flags, uint32_t *out)
    auto d = sync_device(p); std::lock_guard<std::mutex> lock(d->mutex);
    if (!out || flags & ~DRM_SYNCOBJ_CREATE_SIGNALED || !d->next_sync) return -EINVAL;
    *out = d->next_sync++;
-   d->syncs.emplace(*out, flags & DRM_SYNCOBJ_CREATE_SIGNALED);
+   d->syncs.emplace(*out, SyncState{bool(flags & DRM_SYNCOBJ_CREATE_SIGNALED), 0});
    return 0;
 }
 static int sync_destroy(util_sync_provider *p, uint32_t id)
@@ -145,7 +228,10 @@ static int sync_set(util_sync_provider *p, const uint32_t *ids, uint32_t count, 
 {
    auto d = sync_device(p); std::lock_guard<std::mutex> lock(d->mutex);
    for (uint32_t i = 0; i < count; ++i) if (!d->syncs.count(ids[i])) return -EINVAL;
-   for (uint32_t i = 0; i < count; ++i) d->syncs[ids[i]] = value;
+   for (uint32_t i = 0; i < count; ++i) {
+      auto& sync = d->syncs[ids[i]];
+      sync.signaled = value; ++sync.generation;
+   }
    d->changed.notify_all(); return 0;
 }
 static int sync_reset(util_sync_provider *p, const uint32_t *ids, uint32_t count)
@@ -162,7 +248,7 @@ static int sync_wait(util_sync_provider *p, uint32_t *ids, unsigned count,
       unsigned signaled = 0, index = 0;
       for (unsigned i = 0; i < count; ++i) {
          auto it = d->syncs.find(ids[i]); if (it == d->syncs.end()) return -EINVAL;
-         if (it->second) { if (!signaled) index = i; signaled++; }
+         if (it->second.signaled) { if (!signaled) index = i; signaled++; }
       }
       if ((flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) ? signaled == count : signaled != 0) {
          if (first) *first = index;
@@ -201,6 +287,13 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    }
    if (!err && d->checked_commands && !(d->info.capabilities & AMDGPU_RENDER_CHECKED_COPY))
       err = -ENOTSUP;
+   const char *async = getenv("HAIKU_AMDGPU_ASYNC");
+   if (async && *async) {
+      if (strcmp(async, "1") == 0) d->asynchronous = true;
+      else if (strcmp(async, "0") != 0) err = -EINVAL;
+   }
+   if (!err && d->asynchronous && !(d->info.capabilities & AMDGPU_RENDER_QUEUE_COPY))
+      err = -ENOTSUP;
    if (!err && (d->identity.device != 0x67c7 || d->info.gfx_major != 8
                || d->info.address_end <= (8ull << 30) || d->info.max_ib_bytes < 65536)) err = -ENOTSUP;
    // Mesa's color-2D table slot must describe the eight-pipe Polaris layout.
@@ -236,11 +329,19 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    d->sync.handle_to_fd = sync_to_fd; d->sync.fd_to_handle = sync_from_fd;
    d->sync.export_sync_file = sync_to_fd; d->sync.import_sync_file = sync_import;
    d->sync.finalize = sync_finalize;
+   if (d->asynchronous) {
+      d->completion_thread = spawn_thread(completion_worker, "Mesa AMD fences", B_NORMAL_PRIORITY, d);
+      if (d->completion_thread < 0 || resume_thread(d->completion_thread) != B_OK) {
+         if (d->completion_thread >= 0) kill_thread(d->completion_thread);
+         util_vma_heap_finish(&d->low); util_vma_heap_finish(&d->high);
+         close(d->fd); delete d; return -EIO;
+      }
+   }
    *major = 0; *minor = AMDGPU_HAIKU_ABI_VERSION; // Native ABI, not a Linux DRM version.
    *out = d;
    d->trace_remaining = trace_limit();
-   fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root synchronous prototype, %s IB\n",
-           *minor, d->info.active_cus,
+   fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root %s prototype, %s IB\n",
+           *minor, d->info.active_cus, d->asynchronous ? "queued" : "synchronous",
            d->checked_commands ? "kernel-checked copy" :
            d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT ? "kernel-copied" : "mapped");
    return 0;
@@ -250,6 +351,14 @@ uintptr_t ac_drm_device_get_cookie(ac_drm_device *d) { return (uintptr_t)d; }
 int ac_drm_device_get_fd(ac_drm_device *d) { return d->fd; }
 void ac_drm_device_deinitialize(ac_drm_device *d)
 {
+   {
+      std::lock_guard<std::mutex> lock(d->mutex);
+      d->closing = true; d->changed.notify_all();
+   }
+   if (d->completion_thread >= 0) {
+      status_t result;
+      while (wait_for_thread(d->completion_thread, &result) == B_INTERRUPTED) {}
+   }
    // The kernel revokes CPU clones and retires retained VM mappings on close.
    close(d->fd);
    for (auto& entry : d->bos) delete entry.second;
@@ -408,9 +517,12 @@ int ac_drm_bo_export(ac_drm_device *d, ac_drm_bo bo, amdgpu_bo_handle_type type,
 }
 int ac_drm_bo_free(ac_drm_device *d, ac_drm_bo bo)
 {
-   std::lock_guard<std::mutex> lock(d->mutex);
+   std::unique_lock<std::mutex> lock(d->mutex);
    auto b = bo.abo;
    if (!b || lookup(d, b->id) != b) return -EINVAL;
+   uint32_t id = b->id;
+   drain_pending(d, lock);
+   if (lookup(d, id) != b) return -EINVAL;
    // Winsys removes every VA mapping before freeing its BO.
    for (auto& m : d->mappings) if (m.second.bo == b) return -EBUSY;
    auto r = request<amdgpu_buffer>(); r.handle = b->native.handle;
@@ -439,19 +551,24 @@ int ac_drm_bo_query_info(ac_drm_device *d, uint32_t id, amdgpu_bo_info *out)
    memset(out, 0, sizeof(*out)); out->alloc_size = b->native.bytes; out->phys_alignment = 4096;
    out->preferred_heap = b->heap; out->alloc_flags = b->flags; return 0;
 }
-int ac_drm_bo_wait_for_idle(ac_drm_device *d, ac_drm_bo bo, uint64_t, bool *busy)
+int ac_drm_bo_wait_for_idle(ac_drm_device *d, ac_drm_bo bo, uint64_t timeout, bool *busy)
 {
-   // The queue worker has a winsys fence for unsubmitted jobs. Native calls
-   // are synchronous and hold this mutex until the private hardware fence.
-   std::lock_guard<std::mutex> lock(d->mutex);
-   if (!bo.abo || lookup(d, bo.abo->id) != bo.abo) return -EINVAL;
-   *busy = false; return d->lost ? -EIO : 0;
+   int64_t deadline = wait_deadline(timeout);
+   std::unique_lock<std::mutex> lock(d->mutex);
+   if (!busy || !bo.abo || lookup(d, bo.abo->id) != bo.abo) return -EINVAL;
+   uint32_t id = bo.abo->id;
+   // Conservative until per-BO job tracking exists: all submitted device work.
+   while (!d->pending.empty() && !d->lost && wait_change(d, lock, deadline)) {}
+   if (lookup(d, id) != bo.abo) return -EINVAL;
+   *busy = !d->pending.empty() || d->lost;
+   return d->lost ? -EIO : 0;
 }
 int ac_drm_bo_va_op_raw(ac_drm_device *d, uint32_t id, uint64_t offset, uint64_t size,
                         uint64_t addr, uint64_t flags, uint32_t op)
 {
-   std::lock_guard<std::mutex> lock(d->mutex);
+   std::unique_lock<std::mutex> lock(d->mutex);
    if (!size || (addr | size | offset) & 4095) return -EINVAL;
+   drain_pending(d, lock);
    auto r = request<amdgpu_vm_mapping>(); r.address = addr; r.bytes = size;
    if (op == AMDGPU_VA_OP_UNMAP || op == AMDGPU_VA_OP_CLEAR) {
       auto it = d->mappings.find(addr);
@@ -513,11 +630,13 @@ int ac_drm_cs_ctx_create2(ac_drm_device *d, uint32_t priority, uint32_t *id)
 {
    std::lock_guard<std::mutex> lock(d->mutex);
    if (priority != AMDGPU_CTX_PRIORITY_NORMAL || !d->next_context) return -ENOTSUP;
-   *id = d->next_context++; d->contexts.emplace(*id, 0); return 0;
+   *id = d->next_context++; d->contexts.emplace(*id, ContextState{}); return 0;
 }
 int ac_drm_cs_ctx_free(ac_drm_device *d, uint32_t id)
 {
-   std::lock_guard<std::mutex> lock(d->mutex); return d->contexts.erase(id) ? 0 : -EINVAL;
+   std::unique_lock<std::mutex> lock(d->mutex);
+   drain_pending(d, lock);
+   return d->contexts.erase(id) ? 0 : -EINVAL;
 }
 int ac_drm_cs_query_reset_state2(ac_drm_device *d, uint32_t id, uint64_t *flags)
 {
@@ -525,18 +644,25 @@ int ac_drm_cs_query_reset_state2(ac_drm_device *d, uint32_t id, uint64_t *flags)
    if (!d->contexts.count(id)) return -EINVAL;
    auto r = request<amdgpu_memory_info>(); int err = native_call(d, AMDGPU_MEMORY_INFO, r);
    if (err) return err;
-   if (r.faulted) d->lost = true;
+   if (r.faulted) { d->lost = true; d->changed.notify_all(); }
    *flags = d->lost ? AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS : 0;
    return 0;
 }
 int ac_drm_cs_query_fence_status(ac_drm_device *d, uint32_t id, uint32_t type, uint32_t instance,
-                                 uint32_t ring, uint64_t seq, uint64_t, uint64_t flags, uint32_t *expired)
+                                 uint32_t ring, uint64_t seq, uint64_t timeout, uint64_t flags, uint32_t *expired)
 {
-   std::lock_guard<std::mutex> lock(d->mutex);
-   auto it = d->contexts.find(id);
-   if (it == d->contexts.end() || type != AMDGPU_HW_IP_GFX || instance || ring
+   int64_t deadline = wait_deadline(timeout, flags & AMDGPU_QUERY_FENCE_TIMEOUT_IS_ABSOLUTE);
+   std::unique_lock<std::mutex> lock(d->mutex);
+   if (!expired || type != AMDGPU_HW_IP_GFX || instance || ring
        || flags & ~AMDGPU_QUERY_FENCE_TIMEOUT_IS_ABSOLUTE) return -EINVAL;
-   *expired = seq <= it->second; return d->lost ? -EIO : 0;
+   *expired = 0;
+   for (;;) {
+      auto it = d->contexts.find(id);
+      if (it == d->contexts.end() || seq > it->second.submitted) return -EINVAL;
+      if (seq <= it->second.completed) { *expired = 1; return 0; }
+      if (d->lost) return -EIO;
+      if (!wait_change(d, lock, deadline)) return 0;
+   }
 }
 int ac_drm_cs_create_syncobj2(ac_drm_device *d, uint32_t flags, uint32_t *id) { return sync_create(&d->sync, flags, id); }
 int ac_drm_cs_destroy_syncobj(ac_drm_device *d, uint32_t id) { return sync_destroy(&d->sync, id); }
@@ -549,13 +675,15 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
                           int count, drm_amdgpu_cs_chunk *chunks, uint64_t *seq)
 {
    std::vector<uint32_t> dependencies, signals;
+   std::vector<uint32_t> handles;
    std::vector<drm_amdgpu_cs_chunk_ib> ibs;
    drm_amdgpu_cs_chunk_fence fence = {};
    bool has_fence = false;
    if (list || count <= 0 || count > 8 || !chunks || !seq) return -EINVAL;
    // Parse the complete submit before issuing any work or modifying a fence.
    std::unique_lock<std::mutex> lock(d->mutex);
-   if (d->lost) return -EIO;
+   d->changed.wait(lock, [d] { return d->lost || d->closing || (!d->drainers && d->pending.size() < 64); });
+   if (d->lost || d->closing) return -EIO;
    if (!d->contexts.count(ctx)) return -EINVAL;
    uint64_t bytes = 0;
    for (int n = 0; n < count; ++n) {
@@ -564,7 +692,7 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
       if (c.chunk_id == AMDGPU_CHUNK_ID_IB) {
          if (c.length_dw != sizeof(drm_amdgpu_cs_chunk_ib) / 4 || ibs.size() == 2) return -EINVAL;
          auto ib = *(drm_amdgpu_cs_chunk_ib*)ptr;
-         // Mesa sets this cache hint on every GFX IB. Native submission waits
+         // Mesa sets this cache hint on every GFX IB. Native execution waits
          // for the whole job, so its stronger final writeback/invalidation is
          // safe: no draw from this IB can still be executing when it happens.
          const uint32_t supported_ib_flags = AMDGPU_IB_FLAG_PREAMBLE
@@ -590,21 +718,30 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
          if (b->bo_number > d->info.max_buffers || b->bo_info_size != sizeof(drm_amdgpu_bo_list_entry)) return -EINVAL;
          auto entries = (drm_amdgpu_bo_list_entry*)(uintptr_t)b->bo_info_ptr;
          if (b->bo_number && !entries) return -EINVAL;
-         for (unsigned j = 0; j < b->bo_number; ++j) if (!lookup(d, entries[j].bo_handle)) return -EINVAL;
+         for (unsigned j = 0; j < b->bo_number; ++j) {
+            if (!lookup(d, entries[j].bo_handle)) return -EINVAL;
+            handles.push_back(entries[j].bo_handle);
+         }
       } else return -ENOTSUP;
    }
    uint64_t padded = (bytes + d->info.ib_size_alignment - 1) & ~(uint64_t)(d->info.ib_size_alignment - 1);
    if (ibs.empty() || padded > d->commands.bytes) return -ENOSPC;
    for (auto id : dependencies) {
-      while (d->syncs.count(id) && !d->syncs[id] && !d->lost)
+      while (d->syncs.count(id) && !d->syncs[id].signaled && !d->lost && !d->closing)
          d->changed.wait(lock);
-      if (d->lost || !d->syncs.count(id)) return -EIO;
+      if (d->lost || d->closing || !d->syncs.count(id)) return -EIO;
    }
+   // Dependency waits release the lock: another submit or resource operation
+   // may have run. Recheck capacity and every referenced object afterward.
+   d->changed.wait(lock, [d] { return d->lost || d->closing || (!d->drainers && d->pending.size() < 64); });
+   if (d->lost || d->closing) return -EIO;
    if (!d->contexts.count(ctx)) return -EINVAL;
+   if (d->contexts[ctx].submitted == UINT64_MAX) return -ENOSPC;
+   for (auto id : handles) if (!lookup(d, id)) return -EINVAL;
    for (auto id : signals) if (!d->syncs.count(id)) return -EINVAL;
    if (has_fence && !lookup(d, fence.handle)) return -EINVAL;
    // No mapping can change while the submit lock is held. The kernel freezes
-   // this VM during its synchronous ioctl as well. Preamble and main commands
+   // this VM until its graphics jobs retire. Preamble and main commands
    // are adjacent inside a single native IB, so another file cannot interleave.
    uint64_t cursor = 0;
    for (auto& ib : ibs) {
@@ -620,30 +757,46 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
    }
    // GFX8 accepts type-2 NOP padding. No trailing packet is partly copied.
    for (; cursor < padded; cursor += 4) *(uint32_t*)((char*)d->command_cpu + cursor) = 0x80000000;
-   for (auto id : signals) d->syncs[id] = false;
    __sync_synchronize();
    trace_ib(d, ctx, padded / 4);
-   const bool copied = d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT;
-   auto submit = request<amdgpu_gfx_submit>();
-   submit.address = copied ? (uintptr_t)d->command_cpu : d->info.address_start;
-   submit.dwords = padded / 4;
-   if (d->checked_commands) submit.flags = AMDGPU_GFX_VALIDATE_COMMANDS;
-   // The copy path retains immutable outer commands in the kernel until
-   // retirement. The original mapped path remains for older native kernels.
-   // Both remain root-only until PM4/shader isolation is fully qualified.
-   int err = native_call(d, copied ? AMDGPU_GFX_SUBMIT_COPY : AMDGPU_GFX_SUBMIT, submit);
-   if (err || submit.status != B_OK) {
-      d->lost = true; d->changed.notify_all();
-      fprintf(stderr, "amdgpu: native submit failed %d status %#x fault %#x/%#x ring %u/%u\n",
-              err, submit.status, submit.vm_fault_status[0], submit.vm_fault_status[1], submit.rptr, submit.wptr);
-      return err ? err : -EIO;
+   PendingJob job;
+   job.context = ctx; job.sequence = d->contexts[ctx].submitted + 1;
+   if (has_fence) { job.fence_bo = fence.handle; job.fence_offset = fence.offset; }
+   if (d->asynchronous) {
+      auto queued = request<amdgpu_gfx_queue>();
+      queued.address = (uintptr_t)d->command_cpu; queued.dwords = padded / 4;
+      if (d->checked_commands) queued.flags = AMDGPU_GFX_VALIDATE_COMMANDS;
+      int err;
+      // Global quota may be consumed by other files. Keep our captured IB
+      // and lock intact: the kernel worker can retire jobs independently.
+      while ((err = native_call(d, AMDGPU_GFX_QUEUE_COPY, queued)) == -EAGAIN) snooze(1000);
+      if (err) { d->lost = true; d->changed.notify_all(); return err; }
+      job.native_fence = queued.fence;
+   } else {
+      const bool copied = d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT;
+      auto submit = request<amdgpu_gfx_submit>();
+      submit.address = copied ? (uintptr_t)d->command_cpu : d->info.address_start;
+      submit.dwords = padded / 4;
+      if (d->checked_commands) submit.flags = AMDGPU_GFX_VALIDATE_COMMANDS;
+      // The copy path retains immutable outer commands in the kernel until
+      // retirement. The original mapped path remains for older native kernels.
+      // Both remain root-only until PM4/shader isolation is fully qualified.
+      int err = native_call(d, copied ? AMDGPU_GFX_SUBMIT_COPY : AMDGPU_GFX_SUBMIT, submit);
+      if (err || submit.status != B_OK) {
+         d->lost = true; d->changed.notify_all();
+         fprintf(stderr, "amdgpu: native submit failed %d status %#x fault %#x/%#x ring %u/%u\n",
+                 err, submit.status, submit.vm_fault_status[0], submit.vm_fault_status[1], submit.rptr, submit.wptr);
+         return err ? err : -EIO;
+      }
    }
-   *seq = ++d->contexts[ctx];
-   if (has_fence) {
-      auto b = lookup(d, fence.handle);
-      __atomic_store_n((uint64_t*)((char*)b->cpu + fence.offset), *seq, __ATOMIC_RELEASE);
+   *seq = d->contexts[ctx].submitted = job.sequence;
+   for (auto id : signals) {
+      auto& sync = d->syncs[id];
+      sync.signaled = false;
+      job.signals.push_back(PendingSignal{id, ++sync.generation});
    }
-   for (auto id : signals) d->syncs[id] = true;
+   if (d->asynchronous) d->pending.push_back(std::move(job));
+   else publish_completion(d, job);
    d->changed.notify_all(); return 0;
 }
 int ac_drm_query_heap_info(ac_drm_device *d, uint32_t heap, uint32_t flags, amdgpu_heap_info *out)

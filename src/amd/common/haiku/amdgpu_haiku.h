@@ -45,7 +45,8 @@ enum {
 	AMDGPU_GFX_SUBMIT,
 	AMDGPU_IRQ_INFO,
 	AMDGPU_RENDER_INFO,
-	AMDGPU_GFX_SUBMIT_COPY
+	AMDGPU_GFX_SUBMIT_COPY,
+	AMDGPU_GFX_QUEUE_COPY
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO
@@ -116,6 +117,24 @@ struct amdgpu_gfx_submit {
 // without starting/submitting graphics. Zero flags retain the raw lab interface.
 #define AMDGPU_GFX_VALIDATE_COMMANDS 1u
 
+// Root-only asynchronous copied submission. Captures/optionally validates the
+// complete outer IB before returning. Queued jobs retain the client VM and all
+// bindings; VM operations return B_BUSY until this file's graphics jobs retire.
+// Commands cannot be changed by replacing the userspace source after enqueue.
+// Shaders/resources are still caller-controlled, with the same root restriction
+// as GFX_SUBMIT_COPY. flags accepts AMDGPU_GFX_VALIDATE_COMMANDS, reserved is zero.
+// At most 64 queued jobs per file and 256 per device (shared with DMA).
+// fence uses the same ordered file-local sequence and WAIT_FENCE as SUBMIT_DMA.
+// A successful enqueue is not GPU completion. Closing retains pending work;
+// terminal GPU errors fail outstanding fences and quarantine device storage.
+struct amdgpu_gfx_queue {
+	uint32 version, size;
+	uint64 address;
+	uint32 dwords, flags;
+	uint64 fence;
+	uint32 reserved[2];
+};
+
 // Read-only observation after client engine startup; this does not initialize
 // graphics or alter interrupt routing. reserved must be zero. No DMA address
 // or writable ring mapping is exposed. Counts cover this device's lifetime.
@@ -139,7 +158,8 @@ enum {
 	AMDGPU_RENDER_ROOT_SUBMIT = 1,
 	AMDGPU_RENDER_SYNC_SUBMIT = 2,
 	AMDGPU_RENDER_COPY_SUBMIT = 4,
-	AMDGPU_RENDER_CHECKED_COPY = 8
+	AMDGPU_RENDER_CHECKED_COPY = 8,
+	AMDGPU_RENDER_QUEUE_COPY = 16
 };
 struct amdgpu_render_info {
 	uint32 version, size, flags, reserved;

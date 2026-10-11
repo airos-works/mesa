@@ -1,5 +1,5 @@
 The native ABI headers are copied verbatim from air/OS Haiku commit
-6b9d39ebe6 (ABI version 1, copied submission plus opt-in checked commands).
+3c1d83b21a (ABI version 1, copied/checked and queued graphics submission).
 They are MIT licensed; changes must stay synchronized with the kernel source.
 
 amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
@@ -29,6 +29,27 @@ paths and direct privileged register state before GPU submission. It is still
 root-only and does not establish general shader/resource isolation or reset.
 The default remains the qualified raw copied path; 0 explicitly disables the
 additional policy, and other nonempty values fail native initialization.
+HAIKU_AMDGPU_ASYNC=1 selects the queued copied-IB path and requires the
+RENDER_QUEUE_COPY capability; 0 retains synchronous submission (the default).
+A Haiku completion thread waits native fences, then publishes context/CPU
+fences and binary sync objects only after successful GPU completion. Reset
+or replaced sync generations cannot be signaled by an older completion.
+Context and BO-idle waits honor deadlines. VM changes, BO/context destruction
+and device shutdown drain outstanding work; shutdown joins the fence thread
+before closing the device. Resource changes conservatively drain all this
+file's jobs until finer BO tracking is implemented. Queues are bounded at
+64 outstanding submissions; global kernel backpressure retries the captured
+IB without replacing or resubmitting accepted work. Native wait observation
+timeouts/interruption continue observing the same fence.
+
+native_queue_probe (built by Meson on Haiku) exercises pending/completed
+context, CPU and binary-sync fences with real GPU WAIT_REG_MEM gates, copied
+source replacement, relative/absolute deadlines, sync reset/destruction,
+and BO/VM/context/device lifetime. It has --expect-no-device and --unprivileged
+gates. Run after cross-build/QEMU gates, before the actual queued GL suite.
+This implementation is under qualification; no application queue results
+are claimed here yet.
+
 Device loss is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
 sync, sparse mapping, migration and reset are not advertised. Video decoding
 continues through the separate native media add-on.

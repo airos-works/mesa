@@ -56,7 +56,8 @@ enum {
 	AMDGPU_RECOVERY_INFO,
 	AMDGPU_GFX_RECOVER,
 	AMDGPU_GFX_RECOVER_LIVE,
-	AMDGPU_CLIENT_STATUS
+	AMDGPU_CLIENT_STATUS,
+	AMDGPU_RECOVERY_POLICY
 };
 
 // Root-only recovery bring-up. INFO only observes retained bookkeeping.
@@ -90,6 +91,21 @@ struct amdgpu_client_status {
 	int32 status, device_status;
 	uint64 generation, loss_generation;
 	uint64 submitted, completed, failed_fence;
+};
+
+// Root-only automatic GFX recovery policy/query. Enabled by default. A first
+// terminal fault schedules one worker attempt after execution/queues drain;
+// live video and other-engine faults remain unsupported and retained. A failed
+// attempt never retries. flags=0 observes; SET_POLICY accepts enabled=0/1 only
+// on a healthy idle device and cannot rearm an existing fault. All reserved
+// input must be zero. Counters describe automatic attempts, not manual resets.
+#define AMDGPU_RECOVERY_SET_POLICY 1u
+struct amdgpu_recovery_policy {
+	uint32 version, size, flags, reserved;
+	uint32 enabled, pending;
+	int32 status;
+	uint32 reserved_out;
+	uint64 attempts, successes;
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO

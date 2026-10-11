@@ -126,9 +126,10 @@ int main(int argc, char** argv)
    setvbuf(stdout, nullptr, _IOLBF, 0); disable_debugger(1);
    bool software = argc == 2 && !strcmp(argv[1], "--software");
    bool absent = argc == 2 && !strcmp(argv[1], "--expect-no-device");
+   bool automatic = argc == 2 && !strcmp(argv[1], "--auto");
    bool manual = argc == 2 && !strcmp(argv[1], "--manual");
    bool baseline = argc == 2 && !strcmp(argv[1], "--baseline");
-   require(software || absent || manual || baseline, "usage --software|--expect-no-device|--baseline|--manual");
+   require(software || absent || manual || automatic || baseline, "usage --software|--expect-no-device|--baseline|--manual|--auto");
    if (absent) {
       EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY); EGLint a, b;
       require(!eglInitialize(d, &a, &b), "explicit missing device fails initialization");
@@ -139,11 +140,18 @@ int main(int argc, char** argv)
    auto memory = software ? amdgpu_memory_info{} : query<amdgpu_memory_info>(monitor, AMDGPU_MEMORY_INFO);
    auto ram = software ? amdgpu_gart_info{} : query<amdgpu_gart_info>(monitor, AMDGPU_GART_INFO);
    auto g = create_gl(!software); render();
-   if (!manual) {
+   if (!manual && !automatic) {
       if (!software) require(g.reset() == GL_NO_ERROR, "robust render has no reset");
       destroy_gl(g, false); g = create_gl(!software); render(); destroy_gl(g, false);
    } else {
       auto before = healthy(monitor); auto prior = query<amdgpu_recovery_info>(monitor, AMDGPU_RECOVERY_INFO);
+      auto policyBefore = query<amdgpu_recovery_policy>(monitor, AMDGPU_RECOVERY_POLICY);
+      require(!policyBefore.pending, "no pending automatic recovery before fault");
+      if (automatic) require(policyBefore.enabled, "automatic recovery already enabled by default");
+      else {
+         auto set = request<amdgpu_recovery_policy>(); set.flags = AMDGPU_RECOVERY_SET_POLICY; set.enabled = 0;
+         require(!ioctl(monitor, AMDGPU_RECOVERY_POLICY, &set, sizeof(set)) && !set.enabled, "explicit manual qualification policy");
+      }
       int bad = open_device(); query<amdgpu_vm_info>(bad, AMDGPU_VM_INFO);
       auto bo = request<amdgpu_buffer>(); bo.bytes = 8192;
       require(!ioctl(bad, AMDGPU_CREATE_SYSTEM_BUFFER, &bo, sizeof(bo))
@@ -159,18 +167,40 @@ int main(int argc, char** argv)
       require(!ioctl(bad, AMDGPU_GFX_SUBMIT_COPY, &work, sizeof(work)) && work.status == B_BAD_DATA,
          "one terminal synchronous owned write-permission fault");
       auto irq = query<amdgpu_irq_info>(monitor, AMDGPU_IRQ_INFO);
-      require(irq.status == B_BAD_DATA && irq.vm_faults > before.vm_faults && irq.waits == before.waits + 1,
+      if (!automatic) require(irq.status == B_BAD_DATA && irq.vm_faults > before.vm_faults && irq.waits == before.waits + 1,
          "independent IRQ confirms single fault job");
+      auto lost = query<amdgpu_client_status>(bad, AMDGPU_CLIENT_STATUS);
+      require(lost.status == B_BAD_DATA && (lost.flags & AMDGPU_CLIENT_LOST), "synchronous fault remains in native client status");
+      if (automatic) {
+         bigtime_t deadline = system_time() + 5000000;
+         auto state = query<amdgpu_recovery_info>(monitor, AMDGPU_RECOVERY_INFO);
+         while (state.generation == prior.generation && system_time() < deadline) {
+            snooze(1000); state = query<amdgpu_recovery_info>(monitor, AMDGPU_RECOVERY_INFO);
+         }
+         auto policyAfter = query<amdgpu_recovery_policy>(monitor, AMDGPU_RECOVERY_POLICY);
+         require(state.status == B_OK && state.stage == 7 && state.generation == prior.generation + 1
+            && policyAfter.enabled && !policyAfter.pending && policyAfter.status == B_OK
+            && policyAfter.attempts == policyBefore.attempts + 1 && policyAfter.successes == policyBefore.successes + 1,
+            "worker completes one automatic recovery without any reset ioctl");
+         printf("Automatic live recovery generation %llu -> %llu attempts/successes %llu/%llu\n",
+            (unsigned long long)prior.generation, (unsigned long long)state.generation,
+            (unsigned long long)policyAfter.attempts, (unsigned long long)policyAfter.successes);
+      }
       GLenum first = g.reset(); printf("GL first loss %#x native fault %#x\n", first, unsigned(work.status));
       require(first == GL_UNKNOWN_CONTEXT_RESET_KHR, "application observes unknown reset on its innocent robust context");
-      for (unsigned i = 0; i < 3; i++) require(g.reset() == GL_UNKNOWN_CONTEXT_RESET_KHR, "reset remains pending before explicit recovery");
-      lost_dispatch();
-      require(query<amdgpu_irq_info>(monitor, AMDGPU_IRQ_INFO).waits == irq.waits, "lost GL calls submit no work");
-      auto reset = query<amdgpu_recovery_info>(monitor, AMDGPU_GFX_RECOVER_LIVE);
-      printf("Explicit live reset status %#x stage %u generation %llu -> %llu\n", unsigned(reset.status), reset.stage,
-         (unsigned long long)prior.generation, (unsigned long long)reset.generation);
-      require(reset.status == B_OK && reset.stage == 7 && reset.generation == prior.generation + 1,
-         "one explicit live reset succeeds");
+      if (!automatic) {
+         for (unsigned i = 0; i < 3; i++) require(g.reset() == GL_UNKNOWN_CONTEXT_RESET_KHR, "reset remains pending before explicit recovery");
+         lost_dispatch();
+         require(query<amdgpu_irq_info>(monitor, AMDGPU_IRQ_INFO).waits == irq.waits, "lost GL calls submit no work");
+         auto denied = request<amdgpu_recovery_policy>(); denied.flags = AMDGPU_RECOVERY_SET_POLICY; denied.enabled = 1;
+         require(ioctl(monitor, AMDGPU_RECOVERY_POLICY, &denied, sizeof(denied)) < 0 && errno == B_NOT_ALLOWED,
+            "policy cannot arm or retry an existing terminal fault");
+         auto reset = query<amdgpu_recovery_info>(monitor, AMDGPU_GFX_RECOVER_LIVE);
+         printf("Explicit live reset status %#x stage %u generation %llu -> %llu\n", unsigned(reset.status), reset.stage,
+            (unsigned long long)prior.generation, (unsigned long long)reset.generation);
+         require(reset.status == B_OK && reset.stage == 7 && reset.generation == prior.generation + 1,
+            "one explicit live reset succeeds");
+      }
       bool complete = false;
       for (unsigned i = 0; i < 4 && !complete; i++) {
          GLenum state = g.reset(); printf("GL post-reset status %#x\n", state);
@@ -186,6 +216,14 @@ int main(int argc, char** argv)
       require(!closed.live_handles && !closed.live_vms && !closed.buffers && !closed.vms, "lost EGL teardown closes native resources");
       g = create_gl(true); render(); require(g.reset() == GL_NO_ERROR, "recreated application context is healthy"); destroy_gl(g, false);
       require(healthy(monitor).completed_fences > 1, "new EGL display renders through fresh native device");
+      auto policyFinal = query<amdgpu_recovery_policy>(monitor, AMDGPU_RECOVERY_POLICY);
+      require(policyFinal.attempts == policyBefore.attempts + unsigned(automatic)
+         && policyFinal.successes == policyBefore.successes + unsigned(automatic), "no extra automatic attempts during cleanup/recreation");
+      if (!automatic) {
+         policyFinal = request<amdgpu_recovery_policy>(); policyFinal.flags = AMDGPU_RECOVERY_SET_POLICY;
+         policyFinal.enabled = policyBefore.enabled;
+         require(!ioctl(monitor, AMDGPU_RECOVERY_POLICY, &policyFinal, sizeof(policyFinal)), "restore initial healthy policy");
+      }
    }
    if (!software) {
       auto state = query<amdgpu_recovery_info>(monitor, AMDGPU_RECOVERY_INFO);
@@ -196,6 +234,6 @@ int main(int argc, char** argv)
       auto irq = healthy(monitor); printf("Final healthy completed/waits %llu/%llu\n", (unsigned long long)irq.completed_fences, (unsigned long long)irq.waits);
       close(monitor);
    }
-   puts(manual ? "PASS: robust EGL application detects loss, waits for reset completion, rejects old-context rendering, tears down and recreates exact fresh rendering"
+   puts(manual || automatic ? "PASS: robust EGL application detects loss, waits for reset completion, rejects old-context rendering, tears down and recreates exact fresh rendering"
       : "PASS: repeated EGL context/display creation, exact shader pixels and complete cleanup");
 }

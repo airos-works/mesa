@@ -36,11 +36,11 @@ static Buffer buffer(ac_drm_device *d, uint64_t va, uint64_t bytes)
    return b;
 }
 static uint64_t submit(ac_drm_device *d, uint32_t ctx, Buffer& ib, Buffer& data,
-                       Buffer& fence, unsigned offset, uint32_t sync, unsigned slot, bool gated)
+                       Buffer& fence, unsigned offset, uint32_t sync, unsigned slot, bool gated, bool fault = false)
 {
    std::vector<uint32_t> words;
    if (gated) words = {0xc0053c00, 0x13, uint32_t(data.va), uint32_t(data.va >> 32), 1, 0xffffffff, 4};
-   uint64_t dst = data.va + 4096 + slot * 16;
+   uint64_t dst = data.va + 4096 + slot * 16 + (fault ? 0x100000 : 0);
    words.insert(words.end(), {0xc0063700, 0x100500, uint32_t(dst), uint32_t(dst >> 32),
       0x51000000 | slot, ~(0x51000000u | slot), slot, 0x51005100});
    words.resize(256, 0x80000000); memcpy(ib.cpu, words.data(), words.size() * 4);
@@ -87,12 +87,66 @@ static void drain_test(Drain& a)
    release_gate(); status_t result;
    require(wait_for_thread(t, &result) == B_OK && a.done && !a.result, "lifetime operation drains and joins");
 }
+static void fault_test(ac_drm_device *d, int fd, uint32_t a, uint32_t b,
+                       Buffer& ib, Buffer& data, Buffer& f, uint32_t signal, uint32_t failed)
+{
+   // Alias only our own buffer read-only; no unowned GPU address is accessed.
+   require(!ac_drm_bo_va_op_raw(d, data.id, 0, data.bytes, data.va + 0x100000,
+      AMDGPU_VM_PAGE_READABLE, AMDGPU_VA_OP_MAP), "owned read-only alias");
+   auto before = request<amdgpu_irq_info>();
+   require(!ioctl(fd, AMDGPU_IRQ_INFO, &before, sizeof(before)), "fault IRQ before");
+   gate = data.cpu;
+   submit(d, a, ib, data, f, 0, signal, 0, true);
+   submit(d, b, ib, data, f, 8, failed, 1, false, true);
+   submit(d, a, ib, data, f, 0, 0, 2, false);
+   submit(d, b, ib, data, f, 8, 0, 3, false);
+   fence_status(d, a, 2, 0, 0, false);
+   auto memory = request<amdgpu_memory_info>(); auto ram = request<amdgpu_gart_info>();
+   require(!ioctl(fd, AMDGPU_MEMORY_INFO, &memory, sizeof(memory))
+      && !ioctl(fd, AMDGPU_GART_INFO, &ram, sizeof(ram)), "pending fault memory counts");
+   release_gate(); fence_status(d, a, 1, 5000000000, 0, true);
+   for (auto pair : {std::pair<uint32_t, uint64_t>{b, 1}, {a, 2}, {b, 2}}) {
+      uint32_t expired = 123;
+      require(ac_drm_cs_query_fence_status(d, pair.first, AMDGPU_HW_IP_GFX, 0, 0, pair.second,
+         5000000000, 0, &expired) == -EIO && !expired, "faulted/canceled context fence never succeeds");
+   }
+   fence_status(d, a, 1, 0, 0, true);
+   auto p = ac_drm_device_get_sync_provider(d);
+   require(!p->wait(p, &signal, 1, os_time_get_nano(), 0, nullptr), "prior sync stays successful");
+   require(p->wait(p, &failed, 1, os_time_get_nano(), 0, nullptr) == -EIO, "failed sync reports device loss");
+   uint64_t flags = 0; require(!ac_drm_cs_query_reset_state2(d, a, &flags)
+      && (flags & AMDGPU_CTX_QUERY2_FLAGS_RESET), "Mesa observes device loss");
+   // Drain all canceled jobs before inspecting the final CPU fence values.
+   require(!ac_drm_cs_ctx_free(d, a) && !ac_drm_cs_ctx_free(d, b), "faulted contexts drain");
+   require(((uint64_t*)f.cpu)[0] == 1 && ((uint64_t*)f.cpu)[1] == 0,
+      "failed/canceled work cannot publish a successful CPU fence");
+   for (unsigned i = 0; i < data.bytes / 4; ++i) {
+      uint32_t expected = i ? 0x6b6b6b6b : 1;
+      const uint32_t values[] = {0x51000000, ~0x51000000u, 0, 0x51005100};
+      if (i >= 1024 && i < 1028) expected = values[i - 1024];
+      require(data.cpu[i] == expected, "faulted and canceled writes leave every guard unchanged");
+   }
+   auto after = request<amdgpu_irq_info>();
+   require(!ioctl(fd, AMDGPU_IRQ_INFO, &after, sizeof(after)) && after.status == B_BAD_DATA
+      && after.vm_faults == before.vm_faults + 1 && after.waits == before.waits + 2,
+      "only gate and fault reach GPU; independent VM fault observed");
+   int monitor = open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR); require(monitor >= 0, "quarantine monitor");
+   ac_drm_device_deinitialize(d); close(fd);
+   auto retained = request<amdgpu_memory_info>(); auto retained_ram = request<amdgpu_gart_info>();
+   require(!ioctl(monitor, AMDGPU_MEMORY_INFO, &retained, sizeof(retained))
+      && !ioctl(monitor, AMDGPU_GART_INFO, &retained_ram, sizeof(retained_ram))
+      && retained.allocated_bytes == memory.allocated_bytes && retained_ram.allocated_bytes == ram.allocated_bytes
+      && retained.pending_jobs == 0, "device teardown joins failed queue and preserves kernel quarantine");
+   close(monitor);
+   puts("PASS: Mesa queued VM fault propagates to all affected fences, prior success survives, CPU fences/guards stay intact, close drains and quarantines");
+}
 int main(int argc, char **argv)
 {
    disable_debugger(1);
    bool missing = argc == 2 && !strcmp(argv[1], "--expect-no-device");
    bool unprivileged = argc == 2 && !strcmp(argv[1], "--unprivileged");
-   require(argc == 1 || missing || unprivileged, "arguments");
+   bool fault = argc == 2 && !strcmp(argv[1], "--fault");
+   require(argc == 1 || missing || unprivileged || fault, "arguments");
    if (unprivileged) require(setgid(65534) == 0 && setuid(65534) == 0, "drop privilege");
    setenv("HAIKU_AMDGPU_ASYNC", "1", 1); setenv("HAIKU_AMDGPU_VALIDATE_COMMANDS", "1", 1);
    int fd = open("/dev/" AMDGPU_DEVICE_NAME, O_RDWR);
@@ -112,6 +166,7 @@ int main(int argc, char **argv)
       && !ac_drm_cs_ctx_create2(d, AMDGPU_CTX_PRIORITY_NORMAL, &b), "create contexts");
    auto p = ac_drm_device_get_sync_provider(d);
    require(!p->create(p, 0, &signal) && !p->create(p, 0, &reset) && !p->create(p, 0, &destroyed), "create syncs");
+   if (fault) { fault_test(d, fd, a, b, ib, data, f, signal, reset); return 0; }
    gate = data.cpu;
    require(submit(d, a, ib, data, f, 0, signal, 0, true) == 1, "first context sequence");
    require(submit(d, b, ib, data, f, 8, reset, 1, false) == 1, "independent context sequence");

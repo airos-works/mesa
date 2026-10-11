@@ -1,5 +1,6 @@
 The native ABI headers are copied verbatim from air/OS Haiku commit
-3c1d83b21a (ABI version 1, copied/checked and queued graphics submission).
+d229757e9e (ABI version 1, queued graphics, persistent client status and live
+recovery). This revision requires the CLIENT_STATUS kernel operation.
 They are MIT licensed; changes must stay synchronized with the kernel source.
 
 amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
@@ -237,3 +238,33 @@ backups join retained cefb183c/afd206fa checkpoints. The default remains
 synchronous; async=1 is opt-in. Full shader/resource isolation, reset/reuse,
 native display, system defaults and complete release installation remain open.
 The evidence manifest is x399/evidence/wx5100/mesa-native/async-mesa-manifest.json.
+
+Live-client recovery checkpoint (2026-10-11): Mesa d99455c / library 42352938,
+kernel d229757e9e / b64c72e2. Native client status retains first loss even when
+the global fault clears after reset. The reset query reports RESET and, until
+successful recovery, RESET_IN_PROGRESS. Old devices/contexts stay lost and new
+contexts on those files fail; fresh rendering requires a newly opened native
+file. The Haiku winsys queries idle contexts too and uses native completion
+instead of a legacy Linux-version no-op submission. It does not initiate resets.
+
+The explicit native_queue_probe --live-recovery test keeps a faulting device
+and an independent idle device open through an owned read-only permission fault
+and one root-requested reset. The idle device first queries status after the
+reset and correctly discovers its earlier loss. Prior successful and failed
+context/CPU/sync fences retain their results; every idle BO word survives;
+fresh Mesa rendering and cleanup succeed. Two post-reset hardware jobs retire
+with no errors and no live resources/quarantine. This is native ac_drm API
+qualification; application-level robust EGL/GL context loss remains untested.
+
+Host cross compilation/native linking and QEMU software/absence/GLES gates
+pass. Native healthy checks and a later legacy recovery are followed by 1,106
+jobs including all 385 EGL/BGLView/GLES/compositor/window checks, 518 kernel
+queue, seven Mesa queue, 131 VM and 65 exact concurrent-video jobs. Both DMA
+paths pass. Final kernel generation 3 has 1,108 completed/waits, 2,216 EOPs,
+1,616 interrupts, empty 0x8a80 ring and zero errors. Installed private library
+42352938 and kernel b64c72e2 have same-hash backups; previous 82098de9/73a2d203
+remain preserved. Default submission remains synchronous, async/checked paths
+are opt-in, and system defaults/full release remain unchanged. Automatic
+recovery, live UVD/other-engine recovery, remaining shader paths, eviction,
+native display and final release installation remain open. Evidence:
+x399/evidence/wx5100/mesa-native/live-recovery-manifest.json outside git.

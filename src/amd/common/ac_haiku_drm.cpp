@@ -58,6 +58,7 @@ struct ac_drm_device {
    void *command_cpu = nullptr;
    area_id command_area = -1;
    bool lost = false;
+   bool checked_commands = false;
    unsigned trace_remaining = 0, trace_sequence = 0;
 };
 
@@ -193,6 +194,13 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    int err = native_call(d, AMDGPU_GET_INFO, d->identity);
    if (!err) err = native_call(d, AMDGPU_RENDER_INFO, d->info);
    if (!err) err = native_call(d, AMDGPU_VM_INFO, vm);
+   const char *checked = getenv("HAIKU_AMDGPU_VALIDATE_COMMANDS");
+   if (checked && *checked) {
+      if (strcmp(checked, "1") == 0) d->checked_commands = true;
+      else if (strcmp(checked, "0") != 0) err = -EINVAL;
+   }
+   if (!err && d->checked_commands && !(d->info.capabilities & AMDGPU_RENDER_CHECKED_COPY))
+      err = -ENOTSUP;
    if (!err && (d->identity.device != 0x67c7 || d->info.gfx_major != 8
                || d->info.address_end <= (8ull << 30) || d->info.max_ib_bytes < 65536)) err = -ENOTSUP;
    // Mesa's color-2D table slot must describe the eight-pipe Polaris layout.
@@ -233,6 +241,7 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    d->trace_remaining = trace_limit();
    fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root synchronous prototype, %s IB\n",
            *minor, d->info.active_cus,
+           d->checked_commands ? "kernel-checked copy" :
            d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT ? "kernel-copied" : "mapped");
    return 0;
 }
@@ -618,6 +627,7 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
    auto submit = request<amdgpu_gfx_submit>();
    submit.address = copied ? (uintptr_t)d->command_cpu : d->info.address_start;
    submit.dwords = padded / 4;
+   if (d->checked_commands) submit.flags = AMDGPU_GFX_VALIDATE_COMMANDS;
    // The copy path retains immutable outer commands in the kernel until
    // retirement. The original mapped path remains for older native kernels.
    // Both remain root-only until PM4/shader isolation is fully qualified.

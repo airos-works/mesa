@@ -59,7 +59,8 @@ enum {
 	AMDGPU_CLIENT_STATUS,
 	AMDGPU_RECOVERY_POLICY,
 	AMDGPU_UVD_TIMEOUT_TEST,
-	AMDGPU_SDMA_TIMEOUT_TEST
+	AMDGPU_SDMA_TIMEOUT_TEST,
+	AMDGPU_VIDEO_SDMA_TIMEOUT_TEST
 };
 
 // Root-only recovery bring-up. INFO only observes retained bookkeeping.
@@ -130,6 +131,20 @@ struct amdgpu_sdma_timeout_test {
 	int32 status;
 	uint32 sequence, fence, rptr, wptr, engine_status;
 	uint64 elapsed_us;
+};
+
+// Root-only, one-shot fault qualification on this file's decoder. Arm while
+// idle; the next valid decode substitutes the private SDMA memory-poll timeout
+// at the selected transfer boundary. Destroying the session discards the arm.
+// No caller GPU address/command is accepted. The request must be writable.
+enum {
+	AMDGPU_VIDEO_SDMA_CLEAR = 1,
+	AMDGPU_VIDEO_SDMA_READBACK = 2
+};
+struct amdgpu_video_sdma_timeout_test {
+	uint32 version, size;
+	uint64 handle;
+	uint32 stage, reserved;
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO

@@ -364,3 +364,20 @@ Kernel c7 and earlier f8/4d/f2/b64/73,Mesa423/820 backups remain. Evidence:
 sdma-recovery-manifest.json beside prior manifests. DMA failure during decoder
 readback and originating queue failure need direct tests, as do app recovery,
 remaining isolation,eviction,native display,defaults and full installation.
+
+2026-10-11: Decoder DMA failure qualification
+---------------------------------------------
+Kernel/fixture source 433dfca29d (installed a4aebce1, helper 8957d443) adds
+an owner-scoped root diagnostic for one decoder clear/readback boundary.
+Real SDMA poll timeouts exercise the normal decoder failure path and combined
+SDMA/GFX/UVD recovery. H264, Main and Main10 retain live ownership and untouched
+user output, cancel 128 accepted DMA jobs across eight cases, and recreate
+exact decoding. A standalone case recovers before first graphics startup.
+The private Mesa 42352938 runtime is unchanged; this header appends only the
+24-byte AMDGPU_VIDEO_SDMA_TIMEOUT_TEST diagnostic and its two stage constants.
+Robust EGL loss/recreation and the full 1106-job regression pass. Final native
+generation 13 has 1108 completions/waits, 2216 EOPs, 1577 IRQs, empty 0x8a80,
+zero errors/resources/quarantine, automatic policy enabled at 10/10, and a
+verified driver backup. Application decoder/compositor recovery and the
+remaining shader/display/defaults/full-release work remain open. Evidence:
+/mnt/HaikuWork/x399/evidence/wx5100/mesa-native/video-dma-recovery-manifest.json

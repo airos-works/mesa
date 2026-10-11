@@ -1,6 +1,7 @@
 The native ABI headers are copied verbatim from air/OS Haiku commit
-d229757e9e (ABI version 1, queued graphics, persistent client status and live
-recovery). This revision requires the CLIENT_STATUS kernel operation.
+e8425eecbd (ABI version 1, queued graphics, persistent client status, live
+recovery and automatic recovery policy). The runtime backend requires
+CLIENT_STATUS; the extended robustness probe also requires RECOVERY_POLICY.
 They are MIT licensed; changes must stay synchronized with the kernel source.
 
 amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
@@ -268,3 +269,39 @@ are opt-in, and system defaults/full release remain unchanged. Automatic
 recovery, live UVD/other-engine recovery, remaining shader paths, eviction,
 native display and final release installation remain open. Evidence:
 x399/evidence/wx5100/mesa-native/live-recovery-manifest.json outside git.
+
+Robust EGL application / automatic recovery checkpoint (2026-10-11): fixture
+0ddd796, automatic extension 8cdb918 / binary 4b62013f; kernel e8425eecbd /
+f2c890a4. The installed Mesa library remains 42352938. Build the standalone
+native_robustness_probe.cpp with private EGL/GLESv2 headers, this directory on
+the include path, -std=c++17, and -lEGL -lGLESv2 -lbe. run-robustness.sh modes:
+--software, --expect-no-device, --baseline, --manual and --auto. Hardware modes
+require explicit native selection. --manual disables automatic policy only
+while healthy, injects one owned permission fault, checks pending GL loss,
+requests one live reset and restores initial policy after fresh rendering.
+--auto requires automatic recovery already enabled and never issues a reset
+ioctl. Both modes retain the robust EGL/GLES context across the independent
+fault, require UNKNOWN_CONTEXT_RESET then completion, ensure old GL calls
+return CONTEXT_LOST without writing pixels or submitting jobs, and destroy/
+recreate the display/context to render 4,096 exact shader pixels again.
+
+GLES robustness uses EGL_EXT_create_context_robustness attributes. An initial
+fixture incorrectly used desktop-GL KHR flags and failed context creation
+before any injected fault; preserved evidence records the correction. Manual
+queued/synchronous trials pass on b64c72e2. Automatic queued/synchronous and
+manual-policy trials pass on f2c890a4, as do kernel mixed queued faults, CP
+wait timeout, and a non-terminating shader. Automatic recovery is enabled by
+default, once per terminal fault after accepted work drains. Policy changes
+cannot arm an existing fault, and old client/context loss remains permanent.
+Live video and SDMA/UVD faults still exclude this GFX-only policy.
+
+Final legacy manual recovery followed by 1,106 additional healthy queue/VM/
+video/Mesa jobs and both DMA paths passes. Generation8 ends at 1,108 healthy
+completed/waits, 2,216 EOPs, 1,415 interrupts, empty0x8a80 ring, zero errors,
+no live resources/quarantine. Policy is enabled, six automatic attempts/six
+successes, no pending reset. Kernel f2c890a4 and previous b64/73, Mesa423/820
+backups remain installed. Apps still need their own renderer-loss integration;
+this qualifies the robust GLES pbuffer API. Live video/other-engine recovery,
+remaining shader paths, eviction, native display, defaults and full release
+installation remain open. Evidence is auto-recovery-manifest.json beside the
+previous manifests, outside git.

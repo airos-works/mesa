@@ -200,7 +200,9 @@ int ac_drm_device_initialize(int fd, bool virtio, uint32_t *major, uint32_t *min
    d->sync.finalize = sync_finalize;
    *major = 0; *minor = AMDGPU_HAIKU_ABI_VERSION; // Native ABI, not a Linux DRM version.
    *out = d;
-   fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root synchronous prototype\n", *minor, d->info.active_cus);
+   fprintf(stderr, "amdgpu: native Haiku ABI %u, %u CUs, root synchronous prototype, %s IB\n",
+           *minor, d->info.active_cus,
+           d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT ? "kernel-copied" : "mapped");
    return 0;
 }
 util_sync_provider *ac_drm_device_get_sync_provider(ac_drm_device *d) { return &d->sync; }
@@ -580,9 +582,14 @@ int ac_drm_cs_submit_raw2(ac_drm_device *d, uint32_t ctx, uint32_t list,
    for (; cursor < padded; cursor += 4) *(uint32_t*)((char*)d->command_cpu + cursor) = 0x80000000;
    for (auto id : signals) d->syncs[id] = false;
    __sync_synchronize();
-   auto submit = request<amdgpu_gfx_submit>(); submit.address = d->info.address_start;
+   const bool copied = d->info.capabilities & AMDGPU_RENDER_COPY_SUBMIT;
+   auto submit = request<amdgpu_gfx_submit>();
+   submit.address = copied ? (uintptr_t)d->command_cpu : d->info.address_start;
    submit.dwords = padded / 4;
-   int err = native_call(d, AMDGPU_GFX_SUBMIT, submit);
+   // The copy path retains immutable outer commands in the kernel until
+   // retirement. The original mapped path remains for older native kernels.
+   // Both remain root-only until PM4/shader isolation is fully qualified.
+   int err = native_call(d, copied ? AMDGPU_GFX_SUBMIT_COPY : AMDGPU_GFX_SUBMIT, submit);
    if (err || submit.status != B_OK) {
       d->lost = true; d->changed.notify_all();
       fprintf(stderr, "amdgpu: native submit failed %d status %#x fault %#x/%#x ring %u/%u\n",

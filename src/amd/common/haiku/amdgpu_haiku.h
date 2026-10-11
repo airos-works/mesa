@@ -44,7 +44,8 @@ enum {
 	AMDGPU_VM_TEST,
 	AMDGPU_GFX_SUBMIT,
 	AMDGPU_IRQ_INFO,
-	AMDGPU_RENDER_INFO
+	AMDGPU_RENDER_INFO,
+	AMDGPU_GFX_SUBMIT_COPY
 };
 
 // One GPU virtual address space per open client. Mappings retain their BO
@@ -97,6 +98,17 @@ struct amdgpu_gfx_submit {
 	uint32 reserved;
 };
 
+// GFX_SUBMIT_COPY uses the same request, but address is a userspace pointer
+// instead of a GPU VA. The kernel copies exactly dwords * 4 bytes once into
+// this client's private READ|EXECUTE-only storage before execution. CPU
+// alignment is unrestricted; length limits and zero flags/reserved are the
+// same as GFX_SUBMIT. The unused tail is zeroed on every copy, including a
+// failed user copy. This snapshots only the outer IB, not nested IBs/shaders;
+// raw command privilege/recovery qualification still requires root.
+// VM_INFO/RENDER_INFO report the usable VA interval; lower addresses are
+// reserved for the client's private commands and the public diagnostic shader.
+#define AMDGPU_COPY_IB_ADDRESS 0x10000ULL
+
 // Read-only observation after client engine startup; this does not initialize
 // graphics or alter interrupt routing. reserved must be zero. No DMA address
 // or writable ring mapping is exposed. Counts cover this device's lifetime.
@@ -116,7 +128,11 @@ struct amdgpu_irq_info {
 // register access is accepted. Bank/SMC selectors are restored after reads;
 // timestamp capture is serialized with submissions. Clock defaults are ROM
 // boot defaults, not measured clocks or DPM maxima. All sizes are bytes.
-enum { AMDGPU_RENDER_ROOT_SUBMIT = 1, AMDGPU_RENDER_SYNC_SUBMIT = 2 };
+enum {
+	AMDGPU_RENDER_ROOT_SUBMIT = 1,
+	AMDGPU_RENDER_SYNC_SUBMIT = 2,
+	AMDGPU_RENDER_COPY_SUBMIT = 4
+};
 struct amdgpu_render_info {
 	uint32 version, size, flags, reserved;
 	uint32 capabilities, gfx_major, gfx_minor, chip_revision;

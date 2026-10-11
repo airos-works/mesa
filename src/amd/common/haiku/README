@@ -1,5 +1,5 @@
 The native ABI headers are copied verbatim from air/OS Haiku commit
-27d977b422 (AMDGPU_HAIKU_ABI_VERSION 1 plus AMDGPU_RENDER_INFO).
+ef908702af (AMDGPU_HAIKU_ABI_VERSION 1 plus AMDGPU_GFX_SUBMIT_COPY).
 They are MIT licensed; changes must stay synchronized with the kernel source.
 
 amdgpu_libdrm_types.h is the public amdgpu.h from libdrm 2.4.123,
@@ -13,8 +13,11 @@ install a system renderer or imply unprivileged command safety or reset/reuse.
 The backend implements private BOs, 64 GiB file-local GPU address spaces,
 binary CPU synchronization and synchronous graphics submission. It copies
 the preamble and main IB into one owned command buffer and signals Mesa's
-fence only after the kernel's private hardware completion fence. Device loss
-is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
+fence only after the kernel's private hardware completion fence. When the
+kernel advertises COPY_SUBMIT, it snapshots that outer IB into private,
+read-only GPU storage. Older kernels retain the original mapped-IB path.
+This does not validate nested commands or shaders or remove the root gate.
+Device loss is terminal for that instance. Compute/SDMA/video queues, sharing, timeline
 sync, sparse mapping, migration and reset are not advertised. Video decoding
 continues through the separate native media add-on.
 

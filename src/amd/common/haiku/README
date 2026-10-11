@@ -305,3 +305,20 @@ this qualifies the robust GLES pbuffer API. Live video/other-engine recovery,
 remaining shader paths, eviction, native display, defaults and full release
 installation remain open. Evidence is auto-recovery-manifest.json beside the
 previous manifests, outside git.
+
+Retained-video GFX recovery checkpoint (2026-10-11): kernel a85f33f027 /
+4d299065 is installed; Mesa runtime d99455c / 42352938 is unchanged. Automatic
+GFX recovery now retains healthy live UVD sessions, explicitly destroys closed
+firmware sessions before reclaiming their memory, and rechecks lost clients
+when video create/decode waits return. Busy shared SEM and actual UVD/SDMA
+faults remain excluded. Native H264, HEVC Main and Main10 exact pixels, closed
+session accounting, pending create/decode and continuous decode during CP
+timeout pass. Old decoder files stay lost; new sessions work. Kernel helper
+9be4e55bac / 706a1dd2 records the ownership tests. On the same candidate, two
+existing automatic mixed-queue cycles, the robust GLES --auto fixture, legacy
+closed-resource reset and 1,106 further jobs all pass. Final generation12,
+1108 completed/waits,2216EOP,1305IRQ,empty0x8a80,zeroerrors; automaticenabled
+8attempts/8successes, no live resources/quarantine. Kernel 4d/f2/b64/73 and
+Mesa423/820 backups remain. Evidence: video-recovery-manifest.json beside the
+previous manifests. Application renderer recovery integration, actual other-
+engine fault recovery, shader isolation, display and full release remain open.

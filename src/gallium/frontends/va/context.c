@@ -563,6 +563,8 @@ vlVaTerminate(VADriverContextP ctx)
       return VA_STATUS_ERROR_INVALID_CONTEXT;
 
    drv = ctx->pDriverData;
+   for (unsigned i = 0; i < ARRAY_SIZE(drv->image_staging); i++)
+      pipe_resource_reference(&drv->image_staging[i], NULL);
    vl_compositor_cleanup_state(&drv->cstate);
    vl_compositor_cleanup(&drv->compositor);
    if (drv->pipe2)

@@ -42,6 +42,7 @@
 
 #include "vl/vl_compositor.h"
 #include "vl/vl_csc.h"
+#include "vl/vl_defines.h"
 
 #include "util/u_dynarray.h"
 #include "util/u_thread.h"
@@ -355,6 +356,10 @@ typedef struct {
    char vendor_string[256];
 
    bool has_external_handles;
+
+   /* vaGetImage's staging textures, two layers per plane, kept from one
+    * call to the next. */
+   struct pipe_resource *image_staging[VL_NUM_COMPONENTS * 2];
 } vlVaDriver;
 
 typedef struct {

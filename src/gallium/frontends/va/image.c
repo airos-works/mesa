@@ -418,6 +418,33 @@ vlVaSetImagePalette(VADriverContextP ctx, VAImageID image, unsigned char *palett
    return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
+/* A linear texture in GTT that a plane is copied into to be read: kept in
+ * the driver for the next picture, as allocating one for every plane of every
+ * picture (what mapping the plane itself does) costs more than the copy. */
+static struct pipe_resource *
+vlVaGetImageStaging(vlVaDriver *drv, unsigned slot, struct pipe_resource *plane,
+                    unsigned width, unsigned height)
+{
+   struct pipe_resource *staging = drv->image_staging[slot];
+   if (staging && staging->format == plane->format &&
+       staging->width0 == width && staging->height0 == height)
+      return staging;
+
+   pipe_resource_reference(&drv->image_staging[slot], NULL);
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = plane->format,
+      .width0 = width,
+      .height0 = height,
+      .depth0 = 1,
+      .array_size = 1,
+      .usage = PIPE_USAGE_STAGING,
+      .bind = PIPE_BIND_LINEAR,
+   };
+   drv->image_staging[slot] = drv->pipe->screen->resource_create(drv->pipe->screen, &templ);
+   return drv->image_staging[slot];
+}
+
 VAStatus
 vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
              unsigned int width, unsigned int height, VAImageID image)
@@ -530,7 +557,13 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
       pitches[i] = vaimage->pitches[i];
    }
 
-   for (i = 0; i < vaimage->num_planes; i++) {
+   /* Every plane is copied to its staging texture first, then all are read
+    * after a single flush. Planes without one are mapped as they are. */
+   struct pipe_box boxes[VL_NUM_COMPONENTS][2];
+   struct pipe_resource *staging[VL_NUM_COMPONENTS][2] = {{NULL}};
+   unsigned layers[VL_NUM_COMPONENTS] = {0};
+   bool copied = false;
+   for (i = 0; i < MIN2(vaimage->num_planes, VL_NUM_COMPONENTS); i++) {
       unsigned box_w = align(width, 2);
       unsigned box_h = align(height, 2);
       unsigned box_x = x & ~1;
@@ -542,12 +575,32 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
       vl_video_buffer_adjust_size(&box_x, &box_y, i,
                                   pipe_format_to_chroma_format(surf->templat.buffer_format),
                                   surf->templat.interlaced);
-      for (j = 0; j < view_resources[i]->array_size; ++j) {
-         struct pipe_box box;
-         u_box_3d(box_x, box_y, j, box_w, box_h, 1, &box);
+      layers[i] = MIN2(view_resources[i]->array_size, 2);
+      for (j = 0; j < layers[i]; ++j) {
+         u_box_3d(box_x, box_y, j, box_w, box_h, 1, &boxes[i][j]);
+         staging[i][j] = vlVaGetImageStaging(drv, i * 2 + j, view_resources[i],
+                                             box_w, box_h);
+         if (!staging[i][j])
+            continue;
+         drv->pipe->resource_copy_region(drv->pipe, staging[i][j], 0, 0, 0, 0,
+                                         view_resources[i], 0, &boxes[i][j]);
+         copied = true;
+      }
+   }
+   if (copied)
+      drv->pipe->flush(drv->pipe, NULL, 0);
+
+   for (i = 0; i < MIN2(vaimage->num_planes, VL_NUM_COMPONENTS); i++) {
+      for (j = 0; j < layers[i]; ++j) {
+         struct pipe_box box = boxes[i][j];
+         struct pipe_resource *source = view_resources[i];
+         if (staging[i][j]) {
+            source = staging[i][j];
+            u_box_2d(0, 0, box.width, box.height, &box);
+         }
          struct pipe_transfer *transfer;
          uint8_t *map;
-         map = drv->pipe->texture_map(drv->pipe, view_resources[i], 0,
+         map = drv->pipe->texture_map(drv->pipe, source, 0,
                   PIPE_MAP_READ, &box, &transfer);
          if (!map) {
             mtx_unlock(&drv->mutex);

@@ -741,8 +741,16 @@ radv_amdgpu_winsys_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_b
    if (ret)
       return NULL;
 
+#ifdef __HAIKU__
+   /* amdgpu_drm maps buffer objects with an ioctl of its own (drm_haiku.h):
+    * Haiku cannot mmap() a device. */
+   void *data = drmHaikuMmap(fixed_addr, bo->base.size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED | (use_fixed_addr ? MAP_FIXED : 0),
+                             radv_amdgpu_winsys(_ws)->fd, args.out.addr_ptr);
+#else
    void *data = mmap(fixed_addr, bo->base.size, PROT_READ | PROT_WRITE, MAP_SHARED | (use_fixed_addr ? MAP_FIXED : 0),
                      radv_amdgpu_winsys(_ws)->fd, args.out.addr_ptr);
+#endif
    if (data == MAP_FAILED)
       return NULL;
 
@@ -760,6 +768,11 @@ radv_amdgpu_winsys_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *
       return;
 
    assert(bo->cpu_map);
+#ifdef __HAIKU__
+   /* No placed mappings on Haiku (VK_EXT_map_memory_placed is not offered),
+    * so there is no reservation to put back. */
+   drmHaikuMunmap(bo->cpu_map, bo->base.size);
+#else
    if (replace) {
       (void)mmap(bo->cpu_map, bo->base.size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
    } else {
@@ -771,6 +784,7 @@ radv_amdgpu_winsys_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *
 #endif
          munmap(bo->cpu_map, bo->base.size);
    }
+#endif
    bo->cpu_map = NULL;
 }
 

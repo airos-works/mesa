@@ -14,6 +14,26 @@
 #include <sys/sysmacros.h>
 #endif
 
+#ifdef __HAIKU__
+#include <stdlib.h>
+#include <string.h>
+
+/* Haiku's devfs nodes have no device numbers: they are made up as libdrm
+ * does (xf86drm.c), Linux's DRM major and the minor in the node's name. */
+#define major(dev) ((int)(((dev) >> 16) & 0xffff))
+#define minor(dev) ((int)((dev) & 0xffff))
+
+static dev_t
+radv_haiku_node_devid(const char *path)
+{
+   const char *end = path + strlen(path);
+   const char *digits = end;
+   while (digits > path && digits[-1] >= '0' && digits[-1] <= '9')
+      digits--;
+   return (dev_t)((226u << 16) | (unsigned)(atoi(digits) & 0xffff));
+}
+#endif
+
 #include "vk_log.h"
 #include "vk_shader_module.h"
 
@@ -744,7 +764,10 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_legacy_vertex_attributes = !pdev->use_llvm,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
+#ifndef __HAIKU__
+      /* amdgpu_drm's mappings cannot replace a reservation (MAP_FIXED). */
       .EXT_map_memory_placed = true,
+#endif
       .EXT_memory_budget = true,
       .EXT_memory_priority = true,
       .EXT_mesh_shader = radv_taskmesh_enabled(pdev),
@@ -1121,9 +1144,11 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderSubgroupUniformControlFlow = true,
 
       /* VK_EXT_map_memory_placed */
+#ifndef __HAIKU__
       .memoryMapPlaced = true,
       .memoryMapRangePlaced = false,
       .memoryUnmapReserve = true,
+#endif
 
       /* VK_EXT_multi_draw */
       .multiDraw = true,
@@ -2434,6 +2459,10 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
          goto fail_perfcounters;
       }
       pdev->primary_devid = primary_stat.st_rdev;
+#ifdef __HAIKU__
+      if (drm_device->available_nodes & (1 << DRM_NODE_PRIMARY))
+         pdev->primary_devid = radv_haiku_node_devid(drm_device->nodes[DRM_NODE_PRIMARY]);
+#endif
 
       if ((drm_device->available_nodes & (1 << DRM_NODE_RENDER)) &&
           stat(drm_device->nodes[DRM_NODE_RENDER], &render_stat) != 0) {
@@ -2442,6 +2471,10 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
          goto fail_perfcounters;
       }
       pdev->render_devid = render_stat.st_rdev;
+#ifdef __HAIKU__
+      if (drm_device->available_nodes & (1 << DRM_NODE_RENDER))
+         pdev->render_devid = radv_haiku_node_devid(drm_device->nodes[DRM_NODE_RENDER]);
+#endif
    }
 #endif
 

@@ -26,6 +26,7 @@
  **************************************************************************/
 
 #include <assert.h>
+#include <stdlib.h>
 
 #include "pipe/p_screen.h"
 #include "pipe/p_context.h"
@@ -514,6 +515,26 @@ vl_video_buffer_create_ex2(struct pipe_context *pipe,
 }
 
 /* Create pipe_video_buffer by using resource_create with planar formats. */
+/* Where a video buffer's planes go. On Haiku decoded pictures are read by
+ * the processor (there is no dma-buf to hand them on), and with amdgpu_drm
+ * GPU writes into system memory are slow enough that copying a picture out
+ * of video memory costs more than decoding it into system memory to begin
+ * with, up to about 1080p (vaGetImage of a 1080p P010 picture 5.2 -> 0.6 ms
+ * on a WX 5100); larger pictures decode faster in video memory, the decoder
+ * reading its references there. VL_VIDEO_BUFFER_GTT=1/0 forces either. */
+static enum pipe_resource_usage
+vl_video_buffer_usage(const struct pipe_video_buffer *tmpl)
+{
+   const char *value = getenv("VL_VIDEO_BUFFER_GTT");
+   if (value && *value)
+      return atoi(value) ? PIPE_USAGE_STAGING : PIPE_USAGE_DEFAULT;
+#ifdef __HAIKU__
+   if (tmpl->width * tmpl->height <= 1920 * 1088)
+      return PIPE_USAGE_STAGING;
+#endif
+   return PIPE_USAGE_DEFAULT;
+}
+
 struct pipe_video_buffer *
 vl_video_buffer_create_as_resource(struct pipe_context *pipe,
                                    const struct pipe_video_buffer *tmpl,
@@ -530,7 +551,7 @@ vl_video_buffer_create_as_resource(struct pipe_context *pipe,
    templ.depth0 = 1;
    templ.array_size = array_size;
    templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | tmpl->bind;
-   templ.usage = PIPE_USAGE_DEFAULT;
+   templ.usage = vl_video_buffer_usage(tmpl);
    templ.flags = tmpl->flags;
 
    if (tmpl->buffer_format == PIPE_FORMAT_YUYV)

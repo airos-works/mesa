@@ -578,6 +578,9 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
       layers[i] = MIN2(view_resources[i]->array_size, 2);
       for (j = 0; j < layers[i]; ++j) {
          u_box_3d(box_x, box_y, j, box_w, box_h, 1, &boxes[i][j]);
+         /* planes in host memory are read where they are */
+         if (view_resources[i]->usage == PIPE_USAGE_STAGING)
+            continue;
          staging[i][j] = vlVaGetImageStaging(drv, i * 2 + j, view_resources[i],
                                              box_w, box_h);
          if (!staging[i][j])

@@ -142,6 +142,10 @@ elif with_platform_haiku
     '-D_EGL_BUILT_IN_DRIVER_HAIKU',
   ]
   files_egl += files('drivers/haiku/egl_haiku.cpp')
+  if with_platform_wayland
+    # _eglGetNativePlatform() recognises Wayland displays
+    deps_for_egl += dep_wayland_client
+  endif
 
   incs_for_egl += [inc_gallium, inc_gallium_aux, inc_gallium_drivers, inc_gallium_winsys, inc_gallium_winsys_sw]
   incs_for_egl += [inc_mesa]

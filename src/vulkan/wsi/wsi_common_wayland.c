@@ -68,6 +68,12 @@
 #include <sys/sysmacros.h>
 #endif
 
+#if defined(__HAIKU__) && !defined(major)
+/* Device numbers as libdrm makes them up on Haiku (xf86drm.c). */
+#define major(dev) ((int)(((dev) >> 16) & 0xffff))
+#define minor(dev) ((int)((dev) & 0xffff))
+#endif
+
 struct wsi_wayland;
 
 struct wsi_wl_format {
@@ -901,6 +907,9 @@ shm_handle_format(void *data, struct wl_shm *shm, uint32_t format)
 {
    struct wsi_wl_display *display = data;
 
+   /* a hardware driver uses wl_shm only without dma-buf */
+   if (!display->sw && display->wl_dmabuf)
+      return;
    wsi_wl_display_add_wl_shm_format(display, &display->formats, format);
 }
 
@@ -1403,12 +1412,16 @@ registry_handle_global(void *data, struct wl_registry *registry,
 {
    struct wsi_wl_display *display = data;
 
-   if (display->sw) {
-      if (strcmp(interface, wl_shm_interface.name) == 0) {
-         display->wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
-         wl_shm_add_listener(display->wl_shm, &shm_listener, display);
-      }
-   } else {
+   /* A hardware driver presents through wl_shm too when the compositor has
+    * no zwp_linux_dmabuf_v1 (Haiku's in-process Wayland server: the GPU
+    * blits into a host buffer, which is copied into the shared memory).
+    * Its formats are only taken when there is no dma-buf global, which
+    * a compositor announces before wl_shm is used. */
+   if (strcmp(interface, wl_shm_interface.name) == 0) {
+      display->wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+      wl_shm_add_listener(display->wl_shm, &shm_listener, display);
+   }
+   if (!display->sw) {
       if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0 && version >= 3) {
          display->wl_dmabuf =
             wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
@@ -3543,11 +3556,13 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    struct wsi_drm_image_params drm_image_params;
    uint32_t num_drm_modifiers = 0;
    const uint64_t *drm_modifiers = NULL;
-   if (wsi_device->sw) {
+   /* Without dma-buf, a hardware driver's images are blitted into host
+    * memory and copied into wl_shm buffers, as a software driver's are. */
+   if (wsi_device->sw || !wsi_wl_surface->display->wl_dmabuf) {
       cpu_image_params = (struct wsi_cpu_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_CPU,
       };
-      if (wsi_device->has_import_memory_host &&
+      if (wsi_device->sw && wsi_device->has_import_memory_host &&
           !(WSI_DEBUG & WSI_DEBUG_NOSHM)) {
          buffer_type = WSI_WL_BUFFER_GPU_SHM;
          cpu_image_params.alloc_shm = wsi_wl_alloc_image_shm;

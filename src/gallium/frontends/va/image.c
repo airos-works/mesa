@@ -581,12 +581,18 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
          /* planes in host memory are read where they are */
          if (view_resources[i]->usage == PIPE_USAGE_STAGING)
             continue;
+         /* the whole plane: drivers can copy whole textures faster
+          * (radeonsi: with SDMA) */
          staging[i][j] = vlVaGetImageStaging(drv, i * 2 + j, view_resources[i],
-                                             box_w, box_h);
+                                             view_resources[i]->width0,
+                                             view_resources[i]->height0);
          if (!staging[i][j])
             continue;
+         struct pipe_box whole;
+         u_box_3d(0, 0, j, view_resources[i]->width0, view_resources[i]->height0, 1,
+                  &whole);
          drv->pipe->resource_copy_region(drv->pipe, staging[i][j], 0, 0, 0, 0,
-                                         view_resources[i], 0, &boxes[i][j]);
+                                         view_resources[i], 0, &whole);
          copied = true;
       }
    }
@@ -599,7 +605,7 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
          struct pipe_resource *source = view_resources[i];
          if (staging[i][j]) {
             source = staging[i][j];
-            u_box_2d(0, 0, box.width, box.height, &box);
+            box.z = 0;
          }
          struct pipe_transfer *transfer;
          uint8_t *map;

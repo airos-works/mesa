@@ -942,6 +942,40 @@ void si_decompress_subresource(struct pipe_context *ctx, struct pipe_resource *t
    }
 }
 
+/* A whole texture in video memory read back into a linear one of the same
+ * size in system memory goes through SDMA on a dGPU: GPU writes into system
+ * memory are much faster from SDMA than from the shaders or CP DMA (Radeon
+ * Pro WX 5100 on Haiku's amdgpu_drm: 4.7 against 1.55 GB/s). This is what
+ * readbacks do (staging textures of transfers, vaGetImage). */
+static bool si_sdma_readback(struct si_context *sctx, struct pipe_resource *dst,
+                             unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
+                             struct pipe_resource *src, unsigned src_level,
+                             const struct pipe_box *src_box)
+{
+   struct si_texture *sdst = (struct si_texture *)dst;
+   struct si_texture *ssrc = (struct si_texture *)src;
+
+   if (!sctx->screen->info.has_dedicated_vram || sctx->gfx_level < GFX7)
+      return false;
+   if ((dst->target != PIPE_TEXTURE_2D && dst->target != PIPE_TEXTURE_RECT) ||
+       dst->target != src->target || dst->array_size != 1 || src->array_size != 1)
+      return false;
+   if (dst_level || src_level || dstx || dsty || dstz || src_box->x || src_box->y ||
+       src_box->z || src_box->depth != 1 || src_box->width != (int)src->width0 ||
+       src_box->height != (int)src->height0 || dst->width0 != src->width0 ||
+       dst->height0 != src->height0)
+      return false;
+   if (!sdst->surface.is_linear || ssrc->is_depth || sdst->is_depth ||
+       !(ssrc->buffer.domains & RADEON_DOMAIN_VRAM) ||
+       (sdst->buffer.domains & RADEON_DOMAIN_VRAM) ||
+       util_format_get_blocksize(dst->format) != util_format_get_blocksize(src->format))
+      return false;
+
+   /* SDMA reads the memory as it is: resolve fast clears and compression. */
+   si_decompress_subresource(&sctx->b, src, PIPE_MASK_RGBAZS, 0, 0, 0, false);
+   return si_sdma_copy_image(sctx, sdst, ssrc);
+}
+
 void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst,
                              unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
                              struct pipe_resource *src, unsigned src_level,
@@ -956,6 +990,9 @@ void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst
       si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
       return;
    }
+
+   if (si_sdma_readback(sctx, dst, dst_level, dstx, dsty, dstz, src, src_level, src_box))
+      return;
 
    if (si_compute_copy_image(sctx, dst, dst_level, src, src_level, dstx, dsty, dstz, src_box, true))
       return;

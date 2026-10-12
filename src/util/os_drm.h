@@ -16,6 +16,7 @@
 
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <unistd.h> /* ioctl() on Haiku */
 #include <xf86drm.h>
 
 static inline int

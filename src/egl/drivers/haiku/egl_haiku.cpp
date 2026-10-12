@@ -56,6 +56,13 @@
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
+#ifdef GALLIUM_RADEONSI
+#include <fcntl.h>
+#include <xf86drm.h>
+extern "C" {
+#include "radeonsi/si_public.h"
+}
+#endif
 #ifdef GALLIUM_ZINK
 #include "main/mtypes.h"
 #include "zink/zink_haiku_present.h"
@@ -145,6 +152,42 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
    delete static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
    return true;
 }
+
+#ifdef GALLIUM_RADEONSI
+/* AMD GPUs render through the amdgpu_drm add-on, Linux's DRM driver: radeonsi
+ * on the render node MESA_HAIKU_DRM_DEVICE names, or else on the first AMD
+ * one. Frames are presented by copying them into the window's bitmap.
+ */
+static struct pipe_screen *
+haiku_amdgpu_screen_create(void)
+{
+   const char *path = getenv("MESA_HAIKU_DRM_DEVICE");
+   char *found = NULL;
+   if (!path || !*path) {
+      drmDevicePtr devices[16];
+      int count = drmGetDevices2(0, devices, 16);
+      for (int i = 0; i < count && !found; i++) {
+         if (devices[i]->bustype == DRM_BUS_PCI &&
+             devices[i]->deviceinfo.pci->vendor_id == 0x1002 &&
+             (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)))
+            found = strdup(devices[i]->nodes[DRM_NODE_RENDER]);
+      }
+      if (count > 0)
+         drmFreeDevices(devices, count);
+      path = found;
+   }
+   if (!path)
+      return NULL;
+   int fd = open(path, O_RDWR | O_CLOEXEC);
+   free(found);
+   if (fd < 0)
+      return NULL;
+   /* the winsys keeps a duplicate of the file */
+   struct pipe_screen *screen = radeonsi_haiku_screen_create(fd);
+   close(fd);
+   return screen;
+}
+#endif
 
 // #pragma mark EGLSurface
 
@@ -462,6 +505,15 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    disp->DriverData = (void *)hgl_dpy;
 
    struct pipe_screen *screen = NULL;
+#ifdef GALLIUM_RADEONSI
+   if (!disp->Options.ForceSoftware
+       && !debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false)) {
+      screen = haiku_amdgpu_screen_create();
+      if (screen)
+         hgl_dpy->native_csf = true;
+   }
+   if (!screen) {
+#endif
 #ifdef GALLIUM_PANFROST
    const char *device = getenv("HAIKU_CSF_DEVICE");
    bool explicit_device = device != NULL && *device != '\0';
@@ -501,6 +553,9 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
             winsys->destroy(winsys);
       }
    }
+#ifdef GALLIUM_RADEONSI
+   }
+#endif
    if (!screen) {
       free(hgl_dpy);
       disp->DriverData = NULL;

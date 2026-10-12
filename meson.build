@@ -1699,6 +1699,11 @@ if system_has_kms_drm
     required : with_dri2 or with_dri or with_gbm,
     allow_fallback: allow_fallback_for_libdrm,
   )
+elif with_platform_haiku and ((with_amd_vk and not with_platform_windows) or with_gallium_radeonsi)
+  # Haiku has no KMS, but the amdgpu_drm add-on is Linux's DRM driver for
+  # rendering and libdrm is ported to it.
+  dep_libdrm = dependency('libdrm', version : '>=' + _drm_ver,
+                          allow_fallback: allow_fallback_for_libdrm)
 else
   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
   # dependencies (such as vk-runtime) linking to it

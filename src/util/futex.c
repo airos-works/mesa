@@ -114,6 +114,73 @@ int futex_wait(uint32_t *addr, int32_t value, const struct timespec *timeout)
    return futex(addr, FUTEX_WAIT, value, &tsrel, NULL);
 }
 
+#elif defined(__HAIKU__)
+
+/* Haiku has no futex system call: an emulation with a condition variable for
+ * each bucket of addresses. A wake wakes all waiters of the bucket, which
+ * futex semantics allow, since every waiter checks its value again. With
+ * it, a simple_mtx_t is zero-initialized as on Linux (Haiku's pthread
+ * mutexes are not: Mesa code that relies on that trips libroot's asserts).
+ */
+
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+
+#define FUTEX_BUCKETS 64
+
+static struct {
+   pthread_mutex_t mutex;
+   pthread_cond_t cond;
+} futex_buckets[FUTEX_BUCKETS] = {
+   [0 ... FUTEX_BUCKETS - 1] = {
+      PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER
+   }
+};
+
+static unsigned
+futex_bucket(const uint32_t *addr)
+{
+   uintptr_t value = (uintptr_t)addr;
+   return (unsigned)((value >> 2) ^ (value >> 9)) % FUTEX_BUCKETS;
+}
+
+int futex_wake(uint32_t *addr, int32_t count)
+{
+   unsigned bucket = futex_bucket(addr);
+   pthread_mutex_lock(&futex_buckets[bucket].mutex);
+   pthread_cond_broadcast(&futex_buckets[bucket].cond);
+   pthread_mutex_unlock(&futex_buckets[bucket].mutex);
+   return 0;
+}
+
+int futex_wait(uint32_t *addr, int32_t value, const struct timespec *timeout)
+{
+   unsigned bucket = futex_bucket(addr);
+   int result = 0;
+
+   pthread_mutex_lock(&futex_buckets[bucket].mutex);
+   /* a waker changes the value before it takes the bucket's mutex */
+   if (__atomic_load_n(addr, __ATOMIC_SEQ_CST) != (uint32_t)value) {
+      pthread_mutex_unlock(&futex_buckets[bucket].mutex);
+      errno = EAGAIN;
+      return -1;
+   }
+   if (timeout == NULL)
+      result = pthread_cond_wait(&futex_buckets[bucket].cond,
+                                 &futex_buckets[bucket].mutex);
+   else
+      result = pthread_cond_clockwait(&futex_buckets[bucket].cond,
+                                      &futex_buckets[bucket].mutex,
+                                      CLOCK_MONOTONIC, timeout);
+   pthread_mutex_unlock(&futex_buckets[bucket].mutex);
+   if (result != 0) {
+      errno = result;
+      return -1;
+   }
+   return 0;
+}
+
 #elif defined(_WIN32) && !defined(WINDOWS_NO_FUTEX)
 
 #include <windows.h>

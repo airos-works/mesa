@@ -33,6 +33,8 @@
 #define UTIL_FUTEX_SUPPORTED 1
 #elif defined(__OpenBSD__)
 #define UTIL_FUTEX_SUPPORTED 1
+#elif defined(__HAIKU__)
+#define UTIL_FUTEX_SUPPORTED 1
 #elif defined(_WIN32) && !defined(WINDOWS_NO_FUTEX)
 #define UTIL_FUTEX_SUPPORTED 1
 #else

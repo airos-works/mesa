@@ -1726,3 +1726,28 @@ void si_put_aux_context_flush(struct si_aux_context *ctx)
    ctx->ctx->flush(ctx->ctx, NULL, 0);
    mtx_unlock(&ctx->lock);
 }
+
+#ifdef __HAIKU__
+#include "util/driconf.h"
+
+struct pipe_screen *radeonsi_haiku_screen_create(int fd)
+{
+#undef OPT_BOOL
+#undef OPT_INT
+   static const driOptionDescription descriptions[] = {
+#include "driinfo_radeonsi.h"
+   };
+#undef OPT_BOOL
+#undef OPT_INT
+   driOptionCache info = {0}, options = {0};
+   driParseOptionInfo(&info, descriptions, ARRAY_SIZE(descriptions));
+   struct pipe_screen_config config = {
+      .options = &options,
+      .options_info = &info,
+   };
+   struct pipe_screen *screen = radeonsi_screen_create(fd, &config);
+   driDestroyOptionCache(&options);
+   driDestroyOptionInfo(&info);
+   return screen;
+}
+#endif

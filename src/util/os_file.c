@@ -232,6 +232,12 @@ typedef void *kvaddr_t;
 
 #endif /* DETECT_OS_DRAGONFLY || DETECT_OS_FREEBSD */
 
+#if DETECT_OS_HAIKU
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h> /* ioctl() */
+#endif
+
 int
 os_same_file_description(int fd1, int fd2)
 {
@@ -283,6 +289,30 @@ os_same_file_description(int fd1, int fd2)
       return -1;
 
    return (fd1_kfile < fd2_kfile) | ((fd1_kfile > fd2_kfile) << 1);
+#elif DETECT_OS_HAIKU
+   /* No system call says it, but amdgpu_drm reports an id for each open DRM
+    * file (DRM_HAIKU_IOCTL_DEVICE_INFO, libdrm's drm_haiku.h). */
+   struct {
+      uint32_t minor, node_type;
+      uint16_t domain;
+      uint8_t bus, dev, func, revision_id;
+      uint16_t vendor_id, device_id, subvendor_id, subdevice_id;
+      uint32_t class_code;
+      uint32_t file_id[2];
+      uint32_t reserved[2];
+   } info1, info2;
+   const unsigned long device_info = (2ul << 30) | (sizeof(info1) << 16) |
+                                     ('d' << 8) | 0xf2;
+   memset(&info1, 0, sizeof(info1));
+   memset(&info2, 0, sizeof(info2));
+   if (ioctl(fd1, device_info, &info1, sizeof(info1)) != 0 ||
+       ioctl(fd2, device_info, &info2, sizeof(info2)) != 0)
+      return -1;
+   uint64_t id1 = info1.file_id[0] | (uint64_t)info1.file_id[1] << 32;
+   uint64_t id2 = info2.file_id[0] | (uint64_t)info2.file_id[1] << 32;
+   if (id1 == 0 || id2 == 0)
+      return -1;
+   return (id1 < id2) | ((id1 > id2) << 1);
 #elif DETECT_OS_LINUX
    int efd = epoll_create1(EPOLL_CLOEXEC);
    if (efd < 0)

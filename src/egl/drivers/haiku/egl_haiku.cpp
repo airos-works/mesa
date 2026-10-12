@@ -119,8 +119,12 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
 {
    if (!pipe || !buffer->winsysContext || !texture || texture->width0 == 0 ||
        texture->height0 == 0 || texture->width0 > INT32_MAX ||
-       texture->format != PIPE_FORMAT_BGRA8888_UNORM)
+       texture->format != PIPE_FORMAT_BGRA8888_UNORM) {
+      ERROR("cannot present texture %p (format %d, %ux%u)\n", texture,
+            texture ? texture->format : -1, texture ? texture->width0 : 0,
+            texture ? texture->height0 : 0);
       return false;
+   }
 
    const unsigned width = texture->width0, height = texture->height0;
    BBitmap *bitmap = new(std::nothrow) BBitmap(
@@ -138,6 +142,8 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
       pipe->texture_map(pipe, texture, 0, PIPE_MAP_READ, &box, &transfer));
    if (!pixels || transfer->stride < row_bytes ||
        bitmap->BytesPerRow() < int64_t(row_bytes)) {
+      ERROR("cannot map texture for presentation (%p, stride %u)\n", pixels,
+            pixels ? transfer->stride : 0);
       if (pixels)
          pipe->texture_unmap(pipe, transfer);
       delete bitmap;

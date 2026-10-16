@@ -159,9 +159,18 @@ __getProgramName()
 static char *
 __getProgramName()
 {
+   /* get_image_info() takes an image ID, not a team ID: find the team's
+    * application image instead.
+    */
    image_info info;
-   get_image_info(B_CURRENT_TEAM, &info);
-   return strdup(info.name);
+   int32 cookie = 0;
+   while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+      if (info.type == B_APP_IMAGE) {
+         const char *progname = strrchr(info.name, '/');
+         return strdup(progname ? progname + 1 : info.name);
+      }
+   }
+   return strdup("");
 }
 #else
 #define GET_PROGRAM_NAME_NOT_AVAILABLE

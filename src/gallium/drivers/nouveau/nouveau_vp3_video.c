@@ -205,7 +205,25 @@ static void
 nouveau_vp3_decoder_destroy(struct pipe_video_codec *decoder)
 {
    struct nouveau_vp3_decoder *dec = (struct nouveau_vp3_decoder *)decoder;
+   struct nouveau_bo *engine_bos[] = {
+      dec->ref_bo, dec->bitplane_bo, dec->inter_bo[0], dec->inter_bo[1],
+   };
+   unsigned b;
    int i;
+
+   /* The engines may still be working through the last pictures. If their
+    * objects and channels go away now, the kernel cannot idle the channel
+    * and the next decoder that binds the engines hangs the GPU. Every stage
+    * reads or writes one of these buffers, so wait for them first.
+    */
+   for (b = 0; b < ARRAY_SIZE(engine_bos); ++b) {
+      if (engine_bos[b])
+         nouveau_bo_wait(engine_bos[b], NOUVEAU_BO_RDWR, dec->client);
+   }
+   for (i = 0; i < NOUVEAU_VP3_VIDEO_QDEPTH; ++i) {
+      if (dec->bsp_bo[i])
+         nouveau_bo_wait(dec->bsp_bo[i], NOUVEAU_BO_RDWR, dec->client);
+   }
 
    nouveau_bo_ref(NULL, &dec->ref_bo);
    nouveau_bo_ref(NULL, &dec->bitplane_bo);

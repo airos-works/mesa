@@ -111,6 +111,8 @@ struct nouveau_vp3_decoder {
       unsigned decoded_bottom : 1;
       unsigned decoded_first : 1;
    } refs[17];
+   /* H.264 reference pictures by fifo_idx - 1, as the last picture used them */
+   struct nouveau_vp3_video_buffer *h264_refs[16];
    unsigned fence_seq, fw_sizes, last_frame_num, tmp_stride, ref_stride;
 
    unsigned bsp_idx, vp_idx, ppp_idx;

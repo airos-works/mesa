@@ -317,7 +317,7 @@ nouveau_vp3_fill_picparm_h264_vp(struct nouveau_vp3_decoder *dec,
                                  char *map)
 {
    struct h264_picparm_vp stub_h = {}, *h = &stub_h;
-   unsigned ring, i, j = 0;
+   unsigned ring, i, j = 0, num_refs, slot[16];
    assert(offsetof(struct h264_picparm_vp, u224) == 0x224);
    *is_ref = d->is_reference;
    dec->last_frame_num = d->frame_num;
@@ -360,10 +360,33 @@ nouveau_vp3_fill_picparm_h264_vp(struct nouveau_vp3_decoder *dec,
    memcpy(h->m4x4, d->pps->ScalingList4x4, sizeof(h->m4x4));
    memcpy(h->m8x8, d->pps->ScalingList8x8, sizeof(h->m8x8));
    h->u220 = 0;
-   for (i = 0; i < d->num_ref_frames; ++i) {
-      if (!d->ref[i])
-         break;
+
+   /* The motion vectors VP stores with a picture name the pictures they
+    * point to by fifo_idx. Temporal direct prediction in B slices reads the
+    * vectors of the colocated picture, so these names must still point to
+    * the same pictures: a reference keeps its fifo_idx for as long as it is
+    * one. Applications may reorder the reference list at every picture
+    * (ffmpeg puts the newest reference first), so keep each reference in
+    * the slot it had for the previous picture and put new ones in free
+    * slots.
+    */
+   for (num_refs = 0; num_refs < d->num_ref_frames && d->ref[num_refs]; ++num_refs) {
+      for (j = 0; j < 16 && dec->h264_refs[j] != (void *)d->ref[num_refs]; ++j);
+      slot[num_refs] = j;
+      if (j < 16)
+         refs[j] = dec->h264_refs[j];
+   }
+   for (i = 0; i < num_refs; ++i) {
+      if (slot[i] < 16)
+         continue;
+      for (j = 0; refs[j]; ++j);
+      slot[i] = j;
       refs[j] = (struct nouveau_vp3_video_buffer *)d->ref[i];
+   }
+   memcpy(dec->h264_refs, refs, sizeof(dec->h264_refs));
+
+   for (i = 0; i < num_refs; ++i) {
+      j = slot[i];
       h->refs[j].fifo_idx = j + 1;
       h->refs[j].tmp_idx = refs[j]->valid_ref;
       assert(dec->refs[refs[j]->valid_ref].vidbuf == refs[j]);
@@ -384,7 +407,6 @@ nouveau_vp3_fill_picparm_h264_vp(struct nouveau_vp3_decoder *dec,
          dec->refs[refs[j]->valid_ref].decoded_bottom && d->bottom_is_reference[i] ?
          1 + d->is_long_term[i] : 0;
       h->refs[j].pad = 0;
-      j++;
    }
    for (; i < 16; ++i)
       assert(!d->ref[i]);

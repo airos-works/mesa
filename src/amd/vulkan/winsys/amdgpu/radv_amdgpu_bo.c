@@ -893,14 +893,12 @@ error:
 }
 
 static VkResult
-radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priority, struct radeon_winsys_bo **out_bo,
-                              uint64_t *alloc_size)
+radv_amdgpu_winsys_bo_import(struct radv_amdgpu_winsys *ws, enum amdgpu_bo_handle_type type, uint32_t shared_handle,
+                             unsigned priority, struct radeon_winsys_bo **out_bo, uint64_t *alloc_size)
 {
-   struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
    struct radv_amdgpu_winsys_bo *bo;
    uint64_t va;
    amdgpu_va_handle va_handle;
-   enum amdgpu_bo_handle_type type = amdgpu_bo_handle_type_dma_buf_fd;
    struct ac_drm_bo_import_result result;
    struct amdgpu_bo_info info;
    enum radeon_bo_domain initial = 0;
@@ -915,7 +913,7 @@ radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priori
    if (!bo)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   r = ac_drm_bo_import(ws->dev, type, fd, &result);
+   r = ac_drm_bo_import(ws->dev, type, shared_handle, &result);
    if (r) {
       vk_result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
       goto error;
@@ -985,6 +983,60 @@ error:
    FREE(bo);
    return vk_result;
 }
+
+static VkResult
+radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priority, struct radeon_winsys_bo **out_bo,
+                              uint64_t *alloc_size)
+{
+   return radv_amdgpu_winsys_bo_import(radv_amdgpu_winsys(_ws), amdgpu_bo_handle_type_dma_buf_fd, fd, priority, out_bo,
+                                       alloc_size);
+}
+
+#ifdef __HAIKU__
+/* amdgpu_drm's DRM_HAIKU_IOCTL_SCANOUT (libdrm's drm_haiku.h): the accelerant
+ * publishes the frame buffer the screen scans out from, and op 2 gives a
+ * handle to it on this file, which libdrm on Haiku imports as a KMS handle. */
+struct radv_haiku_scanout {
+   uint32_t op;
+   uint32_t handle;
+   uint32_t width;
+   uint32_t height;
+   uint32_t pitch;
+   uint32_t format;
+   uint32_t generation;
+   uint32_t reserved;
+   uint64_t size;
+};
+
+#define RADV_HAIKU_SCANOUT_GET 2
+#define RADV_HAIKU_IOCTL_SCANOUT DRM_IOWR(0xf8, struct radv_haiku_scanout)
+
+static VkResult
+radv_amdgpu_winsys_bo_from_scanout(struct radeon_winsys *_ws, unsigned priority, struct radeon_winsys_bo **out_bo,
+                                   uint32_t *width, uint32_t *height, uint32_t *row_pitch, uint64_t *size)
+{
+   struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
+   struct radv_haiku_scanout scanout;
+
+   *out_bo = NULL;
+   memset(&scanout, 0, sizeof(scanout));
+   scanout.op = RADV_HAIKU_SCANOUT_GET;
+   if (drmIoctl(ws->fd, RADV_HAIKU_IOCTL_SCANOUT, &scanout) != 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   /* libdrm takes the handle over, also when it fails */
+   VkResult result =
+      radv_amdgpu_winsys_bo_import(ws, amdgpu_bo_handle_type_kms, scanout.handle, priority, out_bo, NULL);
+   if (result != VK_SUCCESS)
+      return result;
+
+   *width = scanout.width;
+   *height = scanout.height;
+   *row_pitch = scanout.pitch;
+   *size = scanout.size;
+   return VK_SUCCESS;
+}
+#endif
 
 static bool
 radv_amdgpu_winsys_get_fd(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo, int *fd)
@@ -1308,6 +1360,9 @@ radv_amdgpu_bo_init_functions(struct radv_amdgpu_winsys *ws)
    ws->base.buffer_unmap = radv_amdgpu_winsys_bo_unmap;
    ws->base.buffer_from_ptr = radv_amdgpu_winsys_bo_from_ptr;
    ws->base.buffer_from_fd = radv_amdgpu_winsys_bo_from_fd;
+#ifdef __HAIKU__
+   ws->base.buffer_from_scanout = radv_amdgpu_winsys_bo_from_scanout;
+#endif
    ws->base.buffer_get_fd = radv_amdgpu_winsys_get_fd;
    ws->base.buffer_set_metadata = radv_amdgpu_winsys_bo_set_metadata;
    ws->base.buffer_get_metadata = radv_amdgpu_winsys_bo_get_metadata;

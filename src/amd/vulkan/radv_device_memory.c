@@ -9,6 +9,9 @@
  */
 
 #include "radv_device_memory.h"
+#ifdef __HAIKU__
+#include "vk_haiku_scanout.h"
+#endif
 #include "radv_android.h"
 #include "radv_buffer.h"
 #include "radv_debug.h"
@@ -98,7 +101,18 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    const struct wsi_memory_allocate_info *wsi_info =
       vk_find_struct_const(pAllocateInfo->pNext, WSI_MEMORY_ALLOCATE_INFO_MESA);
 
-   if (pAllocateInfo->allocationSize == 0 && !ahb_import_info &&
+#ifdef __HAIKU__
+   /* Our own structure (vk_haiku_scanout.h), so vk_find_struct does not know its name. */
+   VkImportScanoutMemoryHAIKU *scanout_info = NULL;
+   vk_foreach_struct (s, (void *)pAllocateInfo->pNext) {
+      if (s->sType == VK_STRUCTURE_TYPE_IMPORT_SCANOUT_MEMORY_HAIKU)
+         scanout_info = (VkImportScanoutMemoryHAIKU *)s;
+   }
+#else
+   const void *scanout_info = NULL;
+#endif
+
+   if (pAllocateInfo->allocationSize == 0 && !ahb_import_info && !scanout_info &&
        !(export_info &&
          (export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID))) {
       /* Apparently, this is allowed */
@@ -158,6 +172,16 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    mem->android_hardware_buffer = NULL;
 #endif
 
+#ifdef __HAIKU__
+   if (scanout_info) {
+      /* The screen's frame buffer, a linear surface the accelerant scans out
+       * from: a renderer copies finished frames straight into it. */
+      result = device->ws->buffer_from_scanout(device->ws, priority, &mem->bo, &scanout_info->width,
+                                               &scanout_info->height, &scanout_info->rowPitch, &scanout_info->size);
+      if (result != VK_SUCCESS)
+         goto fail;
+   } else
+#endif
    if (ahb_import_info) {
       result = radv_import_ahb_memory(device, mem, priority, ahb_import_info);
       if (result != VK_SUCCESS)

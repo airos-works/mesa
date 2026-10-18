@@ -246,6 +246,12 @@ struct radeon_winsys {
    VkResult (*buffer_from_fd)(struct radeon_winsys *ws, int fd, unsigned priority, struct radeon_winsys_bo **out_bo,
                               uint64_t *alloc_size);
 
+#ifdef __HAIKU__
+   /* The screen's frame buffer (amdgpu_drm's DRM_HAIKU_IOCTL_SCANOUT), with its shape. */
+   VkResult (*buffer_from_scanout)(struct radeon_winsys *ws, unsigned priority, struct radeon_winsys_bo **out_bo,
+                                   uint32_t *width, uint32_t *height, uint32_t *row_pitch, uint64_t *size);
+#endif
+
    bool (*buffer_get_fd)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, int *fd);
 
    bool (*buffer_get_flags_from_fd)(struct radeon_winsys *ws, int fd, enum radeon_bo_domain *domains,

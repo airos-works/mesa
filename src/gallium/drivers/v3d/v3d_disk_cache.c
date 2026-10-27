@@ -52,12 +52,23 @@ v3d_key_size(mesa_shader_stage stage)
 
 void v3d_disk_cache_init(struct v3d_screen *screen)
 {
+#ifdef __HAIKU__
+        /* Haiku has dladdr(), but not dl_iterate_phdr(). Use Mesa's
+         * timestamp fallback rather than assuming a mapped ELF build ID. */
+        struct mesa_sha1 ctx;
+        uint8_t id_sha1[20];
+        _mesa_sha1_init(&ctx);
+        if (!disk_cache_get_function_identifier(v3d_disk_cache_init, &ctx))
+                return;
+        _mesa_sha1_final(&ctx, id_sha1);
+#else
         const struct build_id_note *note =
                 build_id_find_nhdr_for_addr(v3d_disk_cache_init);
         assert(note && build_id_length(note) == 20);
 
         const uint8_t *id_sha1 = build_id_data(note);
         assert(id_sha1);
+#endif
 
         char timestamp[41];
         _mesa_sha1_format(timestamp, id_sha1);

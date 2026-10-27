@@ -97,11 +97,12 @@ v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name,
         struct v3d_bo_cache *cache = &screen->bo_cache;
         uint32_t page_index = size / 4096 - 1;
 
-        if (cache->size_list_size <= page_index)
-                return NULL;
-
         struct v3d_bo *bo = NULL;
         mtx_lock(&cache->lock);
+        if (cache->size_list_size <= page_index) {
+                mtx_unlock(&cache->lock);
+                return NULL;
+        }
         list_for_each_entry(struct v3d_bo, candidate,
                             &cache->size_list[page_index], size_list) {
                 if (candidate->cacheable != cacheable)
@@ -312,8 +313,22 @@ v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time)
         }
 
         if (cache->size_list_size <= page_index) {
+                /* Resizes can increase the largest BO by just one page at a
+                 * time. Grow geometrically and release the old list heads
+                 * after relinking, rather than retaining every prior table
+                 * as a child of the screen until the context is destroyed.
+                 */
+                uint32_t new_size = MAX2(page_index + 1,
+                                        MAX2(64, cache->size_list_size * 2));
                 struct list_head *new_list =
-                        ralloc_array(screen, struct list_head, page_index + 1);
+                        ralloc_array(screen, struct list_head, new_size);
+                if (!new_list) {
+                        /* Caching is optional. Keep the old cache valid if
+                         * its metadata cannot grow and release this BO.
+                         */
+                        v3d_bo_free(bo);
+                        return;
+                }
 
                 /* Move old list contents over (since the array has moved, and
                  * therefore the pointers to the list heads have to change).
@@ -329,11 +344,12 @@ v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time)
                                 new_list[i].prev->next = &new_list[i];
                         }
                 }
-                for (int i = cache->size_list_size; i < page_index + 1; i++)
+                for (int i = cache->size_list_size; i < new_size; i++)
                         list_inithead(&new_list[i]);
 
+                ralloc_free(cache->size_list);
                 cache->size_list = new_list;
-                cache->size_list_size = page_index + 1;
+                cache->size_list_size = new_size;
         }
 
         bo->free_time = time;

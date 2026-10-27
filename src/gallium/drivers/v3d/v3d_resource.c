@@ -112,7 +112,11 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
          */
         uint32_t padding =
                 rsc->base.target == PIPE_BUFFER ? 4 : V3D_TFU_READAHEAD_SIZE;
-        bool cacheable = rsc->tiled &&
+        bool cacheable = (rsc->tiled ||
+                (v3d_screen(pscreen)->haiku_gpu_readback &&
+                 prsc->target == PIPE_TEXTURE_2D &&
+                 prsc->usage == PIPE_USAGE_STAGING &&
+                 (prsc->bind & PIPE_BIND_LINEAR))) &&
                 v3d_screen(pscreen)->has_cacheable_textures &&
                 !(prsc->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
                                   PIPE_RESOURCE_FLAG_MAP_COHERENT));
@@ -160,6 +164,7 @@ v3d_resource_transfer_unmap(struct pipe_context *pctx,
                 free(trans->map);
         }
 
+        pipe_resource_reference(&trans->readback, NULL);
         pipe_resource_reference(&ptrans->resource, NULL);
         slab_free(&v3d->transfer_pool, ptrans);
 }
@@ -267,8 +272,13 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
         enum pipe_format format = prsc->format;
         char *buf;
 
+        *pptrans = NULL;
         /* MSAA maps should have been handled by u_transfer_helper. */
         assert(prsc->nr_samples <= 1);
+
+        /* Tiled maps use temporary CPU memory, never a direct mapping. */
+        if (rsc->tiled && (usage & PIPE_MAP_DIRECTLY))
+                return NULL;
 
         /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
          * being mapped.
@@ -300,6 +310,64 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
         ptrans->usage = usage;
         ptrans->box = *box;
 
+        /* Small reads fit in the CPU cache and cost less than a GPU job.
+         * Whole-frame reads can instead store raster order directly from
+         * the tile buffer, avoiding CPU detiling and its temporary copy.
+         */
+        if (v3d->screen->haiku_gpu_readback && rsc->tiled &&
+            prsc->target == PIPE_TEXTURE_2D && prsc->array_size == 1 &&
+            box->depth == 1 && box->width >= 128 && box->height >= 64 &&
+            (uint64_t)box->width * box->height >= 128 * 1024 &&
+            (usage & PIPE_MAP_READ) &&
+            !(usage & (PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED |
+                       PIPE_MAP_DIRECTLY | PIPE_MAP_DONTBLOCK |
+                       PIPE_MAP_PERSISTENT | PIPE_MAP_COHERENT)) &&
+            !(prsc->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
+                            PIPE_RESOURCE_FLAG_MAP_COHERENT)) &&
+            (format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+             format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+             format == PIPE_FORMAT_B8G8R8X8_UNORM ||
+             format == PIPE_FORMAT_R8G8B8X8_UNORM)) {
+                struct pipe_resource tmpl = {
+                        .target = PIPE_TEXTURE_2D,
+                        .format = format,
+                        .width0 = align(box->width, 16),
+                        .height0 = align(box->height, 4),
+                        .depth0 = 1,
+                        .array_size = 1,
+                        .nr_samples = 1,
+                        .nr_storage_samples = 1,
+                        .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR,
+                        .usage = PIPE_USAGE_STAGING,
+                };
+                trans->readback = pctx->screen->resource_create(pctx->screen, &tmpl);
+                if (trans->readback) {
+                        struct pipe_blit_info blit = {
+                                .src = {.resource = prsc, .level = level,
+                                        .format = format, .box = *box},
+                                .dst = {.resource = trans->readback, .level = 0,
+                                        .format = format,
+                                        .box = {.width = box->width,
+                                                .height = box->height,
+                                                .depth = 1}},
+                                .mask = PIPE_MASK_RGBA,
+                                .filter = PIPE_TEX_FILTER_NEAREST,
+                        };
+                        pctx->blit(pctx, &blit);
+                        v3d_flush_jobs_writing_resource(v3d, trans->readback,
+                                                       V3D_FLUSH_DEFAULT, false);
+                        struct v3d_resource *linear = v3d_resource(trans->readback);
+                        void *mapped = v3d_bo_map_readonly(linear->bo);
+                        if (mapped) {
+                                ptrans->stride = linear->slices[0].stride;
+                                ptrans->layer_stride = linear->cube_map_stride;
+                                *pptrans = ptrans;
+                                return mapped + linear->slices[0].offset;
+                        }
+                        pipe_resource_reference(&trans->readback, NULL);
+                }
+        }
+
         /* Note that the current kernel implementation is synchronous, so no
          * need to do syncing stuff here yet.
          */
@@ -315,23 +383,17 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
                 goto fail;
         }
 
-        *pptrans = ptrans;
-
         /* Our load/store routines work on entire compressed blocks. */
         u_box_pixels_to_blocks(&ptrans->box, &ptrans->box, format);
 
         struct v3d_resource_slice *slice = &rsc->slices[level];
         if (rsc->tiled) {
-                /* No direct mappings of tiled, since we need to manually
-                 * tile/untile.
-                 */
-                if (usage & PIPE_MAP_DIRECTLY)
-                        return NULL;
-
                 ptrans->stride = ptrans->box.width * rsc->cpp;
                 ptrans->layer_stride = ptrans->stride * ptrans->box.height;
 
                 trans->map = malloc(ptrans->layer_stride * ptrans->box.depth);
+                if (!trans->map)
+                        goto fail;
 
                 if (usage & PIPE_MAP_READ) {
                         for (int z = 0; z < ptrans->box.depth; z++) {
@@ -350,11 +412,13 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
                                              &ptrans->box);
                         }
                 }
+                *pptrans = ptrans;
                 return trans->map;
         } else {
                 ptrans->stride = slice->stride;
                 ptrans->layer_stride = rsc->cube_map_stride;
 
+                *pptrans = ptrans;
                 return buf + slice->offset +
                         ptrans->box.y * ptrans->stride +
                         ptrans->box.x * rsc->cpp +
@@ -796,6 +860,8 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
         struct v3d_screen *screen = v3d_screen(pscreen);
 
         struct v3d_resource *rsc = v3d_resource_setup(pscreen, tmpl);
+        if (!rsc)
+                return NULL;
         struct pipe_resource *prsc = &rsc->base;
         /* Use a tiled layout if we can, for better 3D performance. */
         bool should_tile = true;
@@ -910,6 +976,8 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
         struct v3d_resource *rsc = v3d_resource_setup(pscreen, tmpl);
+        if (!rsc)
+                return NULL;
         struct pipe_resource *prsc = &rsc->base;
         struct v3d_resource_slice *slice = &rsc->slices[0];
 

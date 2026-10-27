@@ -33,6 +33,7 @@
 struct v3d_transfer {
         struct pipe_transfer base;
         void *map;
+        struct pipe_resource *readback;
 };
 
 struct v3d_resource_slice {

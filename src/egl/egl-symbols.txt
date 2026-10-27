@@ -45,3 +45,4 @@ eglWaitSync
 MesaGLInteropEGLQueryDeviceInfo
 MesaGLInteropEGLExportObject
 MesaGLInteropEGLFlushObjects
+haiku_mesa_readback_band_bytes (optional)

@@ -36,6 +36,8 @@ struct pipe_screen *v3d_drm_screen_create_renderonly(int fd, struct renderonly *
 #ifdef __HAIKU__
 /* Opens the V3D render device of air/OS and creates the screen on it. */
 struct pipe_screen *v3d_haiku_screen_create(const char *device);
+/* False for any other Gallium driver or when the ownership API is absent. */
+int v3d_haiku_gpu_readback_enabled(struct pipe_screen *screen);
 #endif
 
 #endif /* __V3D_DRM_PUBLIC_H__ */

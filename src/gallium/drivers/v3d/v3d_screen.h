@@ -89,6 +89,7 @@ struct v3d_screen {
         bool has_cpu_queue;
         bool has_multisync;
         bool has_cacheable_textures;
+        bool haiku_gpu_readback;
 
 #if USE_V3D_SIMULATOR
         struct v3d_simulator_file *sim_file;
@@ -110,6 +111,9 @@ struct pipe_screen *v3d_screen_create(int fd,
                                       struct renderonly *ro);
 
 const char *v3d_screen_get_name(struct pipe_screen *pscreen);
+#ifdef __HAIKU__
+int v3d_haiku_gpu_readback_enabled(struct pipe_screen *pscreen);
+#endif
 
 void
 v3d_fence_screen_init(struct v3d_screen *screen);

@@ -99,6 +99,21 @@ struct haiku_egl_surface {
    struct pipe_fence_handle *throttle_fence;
 };
 
+/* Private air/OS performance hint for the current EGL context. A negative
+ * result means no preference, zero means whole rectangles, positive values
+ * give a preferred CPU readback band size in bytes. No GL state is changed.
+ */
+extern "C" PUBLIC int
+haiku_mesa_readback_band_bytes(void)
+{
+#ifdef GALLIUM_V3D
+   struct st_context *st = st_api_get_current();
+   if (st && v3d_haiku_gpu_readback_enabled(st->pipe->screen))
+      return 0;
+#endif
+   return -1;
+}
+
 static void update_size(struct hgl_buffer *buffer);
 
 /* GPU rendering with CPU presentation into Haiku's existing window bitmap.

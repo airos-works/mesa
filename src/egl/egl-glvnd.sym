@@ -1,5 +1,6 @@
 {
 	global:
+		haiku_mesa_readback_band_bytes;
 		__egl_Main;
 		MesaGLInteropEGLQueryDeviceInfo;
 		MesaGLInteropEGLExportObject;

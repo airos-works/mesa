@@ -70,6 +70,15 @@ v3d_screen_get_name(struct pipe_screen *pscreen)
         return screen->name;
 }
 
+#ifdef __HAIKU__
+int
+v3d_haiku_gpu_readback_enabled(struct pipe_screen *pscreen)
+{
+        return pscreen && pscreen->get_name == v3d_screen_get_name &&
+               v3d_screen(pscreen)->haiku_gpu_readback;
+}
+#endif
+
 static const char *
 v3d_screen_get_vendor(struct pipe_screen *pscreen)
 {
@@ -844,6 +853,8 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
                 debug_get_bool_option("V3D_HAIKU_CACHED_TEXTURES", true) &&
                 v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &cacheable) == 0 &&
                 cacheable.value >= 2;
+        screen->haiku_gpu_readback = screen->has_cacheable_textures &&
+                debug_get_bool_option("V3D_HAIKU_GPU_READBACK", true);
 #endif
 
         v3d_fence_screen_init(screen);

@@ -30,6 +30,8 @@
 
 #include <algorithm>
 #include <new>
+#include <cstdlib>
+#include <cstring>
 
 #include "eglconfig.h"
 #include "eglcontext.h"
@@ -93,11 +95,18 @@ struct haiku_egl_context {
    struct hgl_context *ctx;
 };
 
+struct haiku_present_buffer {
+   BBitmap *bitmap;
+   struct pipe_resource *linear;
+   area_id area;
+};
+
 struct haiku_egl_surface {
    _EGLSurface base;
    struct hgl_buffer *fb;
    struct pipe_fence_handle *throttle_fence;
-   BBitmap *back_bitmap;
+   struct haiku_present_buffer *front_buffer;
+   struct haiku_present_buffer *back_buffer;
 };
 
 /* Private air/OS performance hint for the current EGL context. A negative
@@ -117,11 +126,101 @@ haiku_mesa_readback_band_bytes(void)
 
 static void update_size(struct hgl_buffer *buffer);
 
-/* GPU rendering with CPU presentation into Haiku's existing window bitmap.
- * A fresh bitmap is published only after the complete transfer is copied, so
- * a window's drawing thread cannot observe an in-progress write. BitmapHook
- * transfers the previous bitmap back to us while holding its own draw lock.
- */
+/* A view owns its displayed bitmap until SetBitmap returns it. Keep each
+ * shared GPU resource and area alive for exactly the same interval. */
+static void
+haiku_destroy_present_buffer(struct haiku_present_buffer *buffer)
+{
+   if (!buffer)
+      return;
+   delete buffer->bitmap;
+   if (buffer->area >= B_OK)
+      delete_area(buffer->area);
+   pipe_resource_reference(&buffer->linear, NULL);
+   delete buffer;
+}
+
+static bool
+haiku_shared_present_enabled(struct pipe_screen *screen)
+{
+#ifdef GALLIUM_V3D
+   const char *value = std::getenv("HAIKU_V3D_SHARED_PRESENT");
+   return (!value || !std::strcmp(value, "1")) &&
+          v3d_haiku_gpu_readback_enabled(screen);
+#else
+   return false;
+#endif
+}
+
+/* V3D's linear staging resources have a stable cached area. Clone only that
+ * owned area for app_server; normal transfer memory from other drivers must
+ * never be treated as a shareable resource. Failure falls back to CPU copies. */
+static bool
+haiku_create_shared_bitmap(struct pipe_context *pipe,
+                           struct haiku_present_buffer *buffer,
+                           unsigned width, unsigned height)
+{
+   if (!haiku_shared_present_enabled(pipe->screen) ||
+       width < 128 || height < 64 || uint64_t(width) * height < 128 * 1024)
+      return false;
+
+   struct pipe_resource tmpl = {};
+   tmpl.target = PIPE_TEXTURE_2D;
+   tmpl.format = PIPE_FORMAT_BGRA8888_UNORM;
+   tmpl.width0 = align(width, 16);
+   tmpl.height0 = align(height, 4);
+   tmpl.depth0 = tmpl.array_size = 1;
+   tmpl.nr_samples = tmpl.nr_storage_samples = 1;
+   tmpl.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR;
+   tmpl.usage = PIPE_USAGE_STAGING;
+   struct pipe_resource *linear = pipe->screen->resource_create(pipe->screen, &tmpl);
+   if (!linear)
+      return false;
+
+   struct pipe_box box;
+   u_box_2d(0, 0, tmpl.width0, tmpl.height0, &box);
+   struct pipe_transfer *transfer = NULL;
+   void *pixels = pipe->texture_map(pipe, linear, 0,
+      PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_DIRECTLY, &box, &transfer);
+   area_id shared = B_BAD_VALUE;
+   BBitmap *bitmap = NULL;
+   if (pixels && transfer->stride >= size_t(width) * 4 &&
+       transfer->stride <= INT32_MAX) {
+      area_info info;
+      area_id original = area_for(pixels);
+      if (original >= B_OK && get_area_info(original, &info) == B_OK) {
+         size_t offset = static_cast<uint8_t *>(pixels) -
+                         static_cast<uint8_t *>(info.address);
+         size_t bytes = size_t(transfer->stride) * tmpl.height0;
+         if (offset <= info.size && bytes <= info.size - offset) {
+            void *base = NULL;
+            shared = clone_area("Haiku EGL bitmap", &base, B_ANY_ADDRESS,
+               B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA, original);
+            if (shared >= B_OK) {
+               // Initialize padding once. GPU blits touch only visible pixels.
+               memset(pixels, 0, bytes);
+               bitmap = new(std::nothrow) BBitmap(shared, offset,
+                  BRect(0, 0, width - 1, height - 1), 0, B_RGBA32,
+                  transfer->stride);
+            }
+         }
+      }
+   }
+   if (pixels)
+      pipe->texture_unmap(pipe, transfer);
+   if (!bitmap || bitmap->InitCheck() != B_OK) {
+      delete bitmap;
+      if (shared >= B_OK)
+         delete_area(shared);
+      pipe_resource_reference(&linear, NULL);
+      return false;
+   }
+   buffer->bitmap = bitmap;
+   buffer->linear = linear;
+   buffer->area = shared;
+   return true;
+}
+
 static bool
 haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
                       struct pipe_resource *texture)
@@ -136,19 +235,39 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
    if (!surface)
       return false;
    const unsigned width = texture->width0, height = texture->height0;
-   BBitmap *bitmap = surface->back_bitmap;
-   surface->back_bitmap = NULL;
-   if (bitmap && (bitmap->Bounds().IntegerWidth() + 1 != int64_t(width) ||
-                  bitmap->Bounds().IntegerHeight() + 1 != int64_t(height))) {
-      delete bitmap;
-      bitmap = NULL;
+   struct haiku_present_buffer *back = surface->back_buffer;
+   surface->back_buffer = NULL;
+   if (back && (back->bitmap->Bounds().IntegerWidth() + 1 != int64_t(width) ||
+                back->bitmap->Bounds().IntegerHeight() + 1 != int64_t(height))) {
+      haiku_destroy_present_buffer(back);
+      back = NULL;
    }
-   if (!bitmap)
-      bitmap = new(std::nothrow) BBitmap(
-         BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
-   if (!bitmap || bitmap->InitCheck() != B_OK) {
-      delete bitmap;
+   if (!back) {
+      back = new(std::nothrow) haiku_present_buffer{NULL, NULL, B_BAD_VALUE};
+      if (!back)
+         return false;
+      if (!haiku_create_shared_bitmap(pipe, back, width, height))
+         back->bitmap = new(std::nothrow) BBitmap(
+            BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
+   }
+   if (!back->bitmap || back->bitmap->InitCheck() != B_OK) {
+      haiku_destroy_present_buffer(back);
       return false;
+   }
+
+   struct pipe_resource *source = texture;
+   if (back->linear) {
+      struct pipe_blit_info blit = {};
+      blit.src.resource = texture;
+      blit.src.format = texture->format;
+      u_box_2d(0, 0, width, height, &blit.src.box);
+      blit.dst.resource = back->linear;
+      blit.dst.format = back->linear->format;
+      u_box_2d(0, 0, width, height, &blit.dst.box);
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      pipe->blit(pipe, &blit);
+      source = back->linear;
    }
 
    const size_t row_bytes = size_t(width) * 4;
@@ -156,30 +275,36 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
    u_box_2d(0, 0, width, height, &box);
    struct pipe_transfer *transfer = NULL;
    const uint8_t *pixels = static_cast<const uint8_t *>(
-      pipe->texture_map(pipe, texture, 0, PIPE_MAP_READ, &box, &transfer));
+      pipe->texture_map(pipe, source, 0, PIPE_MAP_READ, &box, &transfer));
    if (!pixels || transfer->stride < row_bytes ||
-       bitmap->BytesPerRow() < int64_t(row_bytes)) {
+       back->bitmap->BytesPerRow() < int64_t(row_bytes)) {
       if (pixels)
          pipe->texture_unmap(pipe, transfer);
-      delete bitmap;
+      haiku_destroy_present_buffer(back);
       return false;
    }
 
-   const size_t destination_stride = bitmap->BytesPerRow();
-   for (unsigned y = 0; y < height; ++y) {
-      uint8_t *destination = static_cast<uint8_t *>(bitmap->Bits())
-         + size_t(y) * destination_stride;
-      memcpy(destination, pixels + size_t(y) * transfer->stride, row_bytes);
-      // Every visible pixel was copied; initialize only the row padding.
-      if (destination_stride > row_bytes)
-         memset(destination + row_bytes, 0, destination_stride - row_bytes);
+   // Mapping waits for the GPU and prepares cached CPU reads. A shared bitmap
+   // already aliases this storage, so app_server can read it without a copy.
+   if (!back->linear) {
+      const size_t destination_stride = back->bitmap->BytesPerRow();
+      for (unsigned y = 0; y < height; ++y) {
+         uint8_t *destination = static_cast<uint8_t *>(back->bitmap->Bits())
+            + size_t(y) * destination_stride;
+         memcpy(destination, pixels + size_t(y) * transfer->stride, row_bytes);
+         if (destination_stride > row_bytes)
+            memset(destination + row_bytes, 0, destination_stride - row_bytes);
+      }
    }
    pipe->texture_unmap(pipe, transfer);
-   // SetBitmap retires the prior bitmap under the view's draw lock. Haiku's
-   // DrawBitmap is synchronous, so no app_server read remains when it returns.
-   // Reuse only this retired bitmap; never write the one currently displayed.
-   surface->back_bitmap =
-      static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
+   BBitmap *retired =
+      static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(back->bitmap);
+   // BitmapHook returns our prior front buffer under its draw lock, after
+   // synchronous DrawBitmap reads have completed. Only that buffer is reused.
+   assert(retired == (surface->front_buffer
+      ? surface->front_buffer->bitmap : NULL));
+   surface->back_buffer = surface->front_buffer;
+   surface->front_buffer = back;
    return true;
 }
 
@@ -296,10 +421,12 @@ haiku_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
       if (bitmapHook != NULL) {
          BBitmap *bitmap = bitmapHook->SetBitmap(NULL);
          if (hgl_surf->fb->present)
-            delete bitmap;
+            assert(bitmap == (hgl_surf->front_buffer
+               ? hgl_surf->front_buffer->bitmap : NULL));
       }
 
-      delete hgl_surf->back_bitmap;
+      haiku_destroy_present_buffer(hgl_surf->front_buffer);
+      haiku_destroy_present_buffer(hgl_surf->back_buffer);
       hgl_destroy_st_framebuffer(hgl_surf->fb);
       free(surf);
    }

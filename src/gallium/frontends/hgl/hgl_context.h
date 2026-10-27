@@ -58,6 +58,7 @@ struct hgl_buffer
 	void (*update_size)(struct hgl_buffer* buffer);
 	bool (*present)(struct pipe_context* pipe, struct hgl_buffer* buffer,
 		struct pipe_resource* texture);
+	void* present_private;
 
 	enum pipe_texture_target target;
 	struct pipe_resource* textures[ST_ATTACHMENT_COUNT];

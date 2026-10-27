@@ -97,6 +97,7 @@ struct haiku_egl_surface {
    _EGLSurface base;
    struct hgl_buffer *fb;
    struct pipe_fence_handle *throttle_fence;
+   BBitmap *back_bitmap;
 };
 
 /* Private air/OS performance hint for the current EGL context. A negative
@@ -130,9 +131,21 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
        texture->format != PIPE_FORMAT_BGRA8888_UNORM)
       return false;
 
+   struct haiku_egl_surface *surface =
+      static_cast<struct haiku_egl_surface *>(buffer->present_private);
+   if (!surface)
+      return false;
    const unsigned width = texture->width0, height = texture->height0;
-   BBitmap *bitmap = new(std::nothrow) BBitmap(
-      BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
+   BBitmap *bitmap = surface->back_bitmap;
+   surface->back_bitmap = NULL;
+   if (bitmap && (bitmap->Bounds().IntegerWidth() + 1 != int64_t(width) ||
+                  bitmap->Bounds().IntegerHeight() + 1 != int64_t(height))) {
+      delete bitmap;
+      bitmap = NULL;
+   }
+   if (!bitmap)
+      bitmap = new(std::nothrow) BBitmap(
+         BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
    if (!bitmap || bitmap->InitCheck() != B_OK) {
       delete bitmap;
       return false;
@@ -152,12 +165,21 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
       return false;
    }
 
-   memset(bitmap->Bits(), 0, bitmap->BitsLength());
-   for (unsigned y = 0; y < height; ++y)
-      memcpy(static_cast<uint8_t *>(bitmap->Bits()) + size_t(y) * bitmap->BytesPerRow(),
-             pixels + size_t(y) * transfer->stride, row_bytes);
+   const size_t destination_stride = bitmap->BytesPerRow();
+   for (unsigned y = 0; y < height; ++y) {
+      uint8_t *destination = static_cast<uint8_t *>(bitmap->Bits())
+         + size_t(y) * destination_stride;
+      memcpy(destination, pixels + size_t(y) * transfer->stride, row_bytes);
+      // Every visible pixel was copied; initialize only the row padding.
+      if (destination_stride > row_bytes)
+         memset(destination + row_bytes, 0, destination_stride - row_bytes);
+   }
    pipe->texture_unmap(pipe, transfer);
-   delete static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
+   // SetBitmap retires the prior bitmap under the view's draw lock. Haiku's
+   // DrawBitmap is synchronous, so no app_server read remains when it returns.
+   // Reuse only this retired bitmap; never write the one currently displayed.
+   surface->back_bitmap =
+      static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
    return true;
 }
 
@@ -197,8 +219,10 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    }
 
    wgl_surf->fb->update_size = update_size;
-   if (hgl_dpy->native_csf)
+   if (hgl_dpy->native_csf) {
       wgl_surf->fb->present = haiku_present_texture;
+      wgl_surf->fb->present_private = wgl_surf;
+   }
    update_size(wgl_surf->fb);
    wgl_surf->base.Width = wgl_surf->fb->newWidth;
    wgl_surf->base.Height = wgl_surf->fb->newHeight;
@@ -275,6 +299,7 @@ haiku_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
             delete bitmap;
       }
 
+      delete hgl_surf->back_bitmap;
       hgl_destroy_st_framebuffer(hgl_surf->fb);
       free(surf);
    }

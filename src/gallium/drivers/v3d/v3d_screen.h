@@ -88,6 +88,7 @@ struct v3d_screen {
         bool nonmsaa_texture_size_limit;
         bool has_cpu_queue;
         bool has_multisync;
+        bool has_cacheable_textures;
 
 #if USE_V3D_SIMULATOR
         struct v3d_simulator_file *sim_file;

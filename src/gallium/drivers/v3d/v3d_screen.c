@@ -47,6 +47,7 @@
 
 #include <xf86drm.h>
 #include "v3d_screen.h"
+#include "v3d_haiku_cache.h"
 #include "v3d_context.h"
 #include "v3d_resource.h"
 #include "compiler/v3d_compiler.h"
@@ -834,6 +835,16 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         screen->has_perfmon = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_PERFMON);
         screen->has_cpu_queue = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE);
         screen->has_multisync = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT);
+
+#ifdef __HAIKU__
+        struct drm_v3d_get_param cacheable = {
+                .param = HAIKU_V3D_PARAM_CACHEABLE_BO,
+        };
+        screen->has_cacheable_textures =
+                debug_get_bool_option("V3D_HAIKU_CACHED_TEXTURES", true) &&
+                v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &cacheable) == 0 &&
+                cacheable.value >= 2;
+#endif
 
         v3d_fence_screen_init(screen);
 

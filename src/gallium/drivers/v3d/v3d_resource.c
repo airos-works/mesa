@@ -112,8 +112,12 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
          */
         uint32_t padding =
                 rsc->base.target == PIPE_BUFFER ? 4 : V3D_TFU_READAHEAD_SIZE;
-        bo = v3d_bo_alloc(v3d_screen(pscreen), rsc->size + padding,
-                          "resource");
+        bool cacheable = rsc->tiled &&
+                v3d_screen(pscreen)->has_cacheable_textures &&
+                !(prsc->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
+                                  PIPE_RESOURCE_FLAG_MAP_COHERENT));
+        bo = v3d_bo_alloc_memory(v3d_screen(pscreen), rsc->size + padding,
+                                 "resource", cacheable);
         if (bo) {
                 v3d_bo_unreference(&rsc->bo);
                 rsc->bo = bo;
@@ -300,7 +304,9 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
          * need to do syncing stuff here yet.
          */
 
-        if (usage & PIPE_MAP_UNSYNCHRONIZED)
+        if (rsc->bo->cacheable && !(usage & PIPE_MAP_WRITE))
+                buf = v3d_bo_map_readonly(rsc->bo);
+        else if (usage & PIPE_MAP_UNSYNCHRONIZED)
                 buf = v3d_bo_map_unsynchronized(rsc->bo);
         else
                 buf = v3d_bo_map(rsc->bo);

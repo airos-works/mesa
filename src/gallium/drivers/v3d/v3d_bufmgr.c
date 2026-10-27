@@ -39,6 +39,7 @@
 
 #include "v3d_context.h"
 #include "v3d_screen.h"
+#include "v3d_haiku_cache.h"
 
 static bool dump_stats = false;
 
@@ -90,7 +91,8 @@ v3d_bo_remove_from_cache(struct v3d_bo_cache *cache, struct v3d_bo *bo)
 }
 
 static struct v3d_bo *
-v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
+v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name,
+                  bool cacheable)
 {
         struct v3d_bo_cache *cache = &screen->bo_cache;
         uint32_t page_index = size / 4096 - 1;
@@ -100,9 +102,11 @@ v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
 
         struct v3d_bo *bo = NULL;
         mtx_lock(&cache->lock);
-        if (!list_is_empty(&cache->size_list[page_index])) {
-                bo = list_first_entry(&cache->size_list[page_index],
-                                      struct v3d_bo, size_list);
+        list_for_each_entry(struct v3d_bo, candidate,
+                            &cache->size_list[page_index], size_list) {
+                if (candidate->cacheable != cacheable)
+                        continue;
+                bo = candidate;
 
                 /* Check that the BO has gone idle.  If not, then we want to
                  * allocate something new instead, since we assume that the
@@ -117,13 +121,15 @@ v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
                 v3d_bo_remove_from_cache(cache, bo);
 
                 bo->name = name;
+                break;
         }
         mtx_unlock(&cache->lock);
         return bo;
 }
 
 struct v3d_bo *
-v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+v3d_bo_alloc_memory(struct v3d_screen *screen, uint32_t size, const char *name,
+                    bool cacheable)
 {
         struct v3d_bo *bo;
         int ret;
@@ -134,7 +140,7 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
 
         size = align(size, 4096);
 
-        bo = v3d_bo_from_cache(screen, size, name);
+        bo = v3d_bo_from_cache(screen, size, name, cacheable);
         if (bo) {
                 if (dump_stats) {
                         fprintf(stderr, "Allocated %s %dkb from cache:\n",
@@ -153,9 +159,13 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
         bo->size = size;
         bo->name = name;
         bo->private = true;
+        bo->cacheable = cacheable;
 
         struct drm_v3d_create_bo create = {
-                .size = size
+                .size = size,
+#ifdef __HAIKU__
+                .flags = cacheable ? HAIKU_V3D_BO_CACHEABLE : 0,
+#endif
         };
 
  retry:
@@ -184,6 +194,12 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
         }
 
         return bo;
+}
+
+struct v3d_bo *
+v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+{
+        return v3d_bo_alloc_memory(screen, size, name, false);
 }
 
 void
@@ -522,12 +538,32 @@ v3d_bo_wait(struct v3d_bo *bo, uint64_t timeout_ns, const char *reason)
         return true;
 }
 
-void *
-v3d_bo_map_unsynchronized(struct v3d_bo *bo)
+static void *
+v3d_bo_map_access(struct v3d_bo *bo, bool write)
 {
         uint64_t offset;
         int ret;
 
+#ifdef __HAIKU__
+        if (bo->cacheable) {
+                /* Tiled textures use temporary linear CPU maps. Even an
+                 * unsynchronized map conservatively waits for GPU ownership;
+                 * persistent/coherent buffer mappings remain uncached.
+                 */
+                struct haiku_v3d_handle request = {
+                        bo->handle, write ? 0 : HAIKU_V3D_CPU_READ_ONLY,
+                };
+                do {
+                        ret = ioctl(bo->screen->fd, HAIKU_V3D_CPU_PREPARE,
+                                    &request, sizeof(request));
+                } while (ret != 0 && errno == B_INTERRUPTED);
+                if (ret != 0) {
+                        fprintf(stderr, "cacheable BO prepare failed: %s\n",
+                                strerror(errno));
+                        abort();
+                }
+        }
+#endif
         if (bo->map)
                 return bo->map;
 
@@ -557,6 +593,21 @@ v3d_bo_map_unsynchronized(struct v3d_bo *bo)
         VG(VALGRIND_MALLOCLIKE_BLOCK(bo->map, bo->size, 0, false));
 
         return bo->map;
+}
+
+void *
+v3d_bo_map_unsynchronized(struct v3d_bo *bo)
+{
+        return v3d_bo_map_access(bo, true);
+}
+
+void *
+v3d_bo_map_readonly(struct v3d_bo *bo)
+{
+        void *map = v3d_bo_map_access(bo, false);
+        if (!v3d_bo_wait(bo, OS_TIMEOUT_INFINITE, "read-only map"))
+                abort();
+        return map;
 }
 
 void *

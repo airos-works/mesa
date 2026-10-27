@@ -54,10 +54,13 @@ struct v3d_bo {
          * it's safe to reuse it in the BO cache).
          */
         bool private;
+        bool cacheable;
 };
 
 struct v3d_bo *v3d_bo_alloc(struct v3d_screen *screen, uint32_t size,
                             const char *name);
+struct v3d_bo *v3d_bo_alloc_memory(struct v3d_screen *screen, uint32_t size,
+                                  const char *name, bool cacheable);
 void v3d_bo_last_unreference(struct v3d_bo *bo);
 void v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time);
 struct v3d_bo *v3d_bo_open_name(struct v3d_screen *screen, uint32_t name);
@@ -98,6 +101,9 @@ v3d_bo_unreference(struct v3d_bo **bo)
 
         *bo = NULL;
 }
+
+void *
+v3d_bo_map_readonly(struct v3d_bo *bo);
 
 void *
 v3d_bo_map(struct v3d_bo *bo);

@@ -23,6 +23,8 @@ extern "C" {
 struct pipe_context;
 struct pipe_resource;
 
+#ifndef SUMMIT_HAIKU_PRESENT_VERSION
+/* also in haiku_drm_present.h (EGL Haiku, radeonsi) */
 #define SUMMIT_HAIKU_PRESENT_VERSION 1
 
 struct summit_haiku_present {
@@ -51,6 +53,7 @@ struct summit_haiku_present {
    void (*completed)(void *cookie);
    void *cookie;
 };
+#endif
 
 /* Returns 0 when the copies were submitted, a negative number when this
  * present cannot go to the screen (the caller then presents some other way):

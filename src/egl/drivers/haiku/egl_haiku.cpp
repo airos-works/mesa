@@ -64,8 +64,13 @@ extern "C" {
 }
 #endif
 #ifdef GALLIUM_ZINK
-#include "main/mtypes.h"
 #include "zink/zink_haiku_present.h"
+#endif
+#ifdef GALLIUM_RADEONSI
+#include "haiku_drm_present.h"
+#endif
+#if defined(GALLIUM_ZINK) || defined(GALLIUM_RADEONSI)
+#include "main/mtypes.h"
 #endif
 
 #include <Bitmap.h>
@@ -489,6 +494,9 @@ haiku_display_destroy(_EGLDisplay *disp)
 #ifdef GALLIUM_ZINK
    zink_haiku_present_release(screen);
 #endif
+#ifdef GALLIUM_RADEONSI
+   haiku_drm_present_release(screen);
+#endif
    hgl_destroy_display(hgl_dpy->disp);
    hgl_dpy->disp = NULL;
    screen->destroy(screen); // destroy will deallocate object
@@ -847,15 +855,16 @@ extern "C" const _EGLDriver _eglDriver = {
 };
 
 
-#ifdef GALLIUM_ZINK
+#if defined(GALLIUM_ZINK) || defined(GALLIUM_RADEONSI)
 /* Summit's web process composites each page into a framebuffer object and
  * hands the result to the window system. With a direct window on the screen
  * it can be copied there by the GPU instead of being read back: see
- * zink_haiku_present.h. Found with dlsym(), so EGL's dispatch tables stay as
- * they are. The framebuffer object must be bound for drawing. Returns 0 when
- * the copies were submitted, a negative number when the caller has to present
- * some other way (-10: no current context or not a Zink one, -11: that
- * framebuffer object is not bound or has no colour renderbuffer). */
+ * zink_haiku_present.h, and haiku_drm_present.h for radeonsi. Found with
+ * dlsym(), so EGL's dispatch tables stay as they are. The framebuffer object
+ * must be bound for drawing. Returns 0 when the copies were submitted, a
+ * negative number when the caller has to present some other way (-10: no
+ * current context or not a Zink or radeonsi one, -11: that framebuffer
+ * object is not bound or has no colour renderbuffer). */
 extern "C" __attribute__((visibility("default"))) int
 summit_haiku_present_framebuffer(unsigned framebuffer,
                                  const struct summit_haiku_present *present)
@@ -865,8 +874,17 @@ summit_haiku_present_framebuffer(unsigned framebuffer,
       return -10;
    struct st_context *st = haiku_egl_context(current)->ctx->st;
    struct pipe_screen *screen = st->screen;
-   if (screen == NULL || screen->get_name == NULL
-       || strncmp(screen->get_name(screen), "zink", 4) != 0)
+   const char *name = screen != NULL && screen->get_name != NULL
+      ? screen->get_name(screen) : NULL;
+   bool zink = name != NULL && strncmp(name, "zink", 4) == 0;
+   bool radeonsi = name != NULL && strstr(name, "radeonsi") != NULL;
+#ifndef GALLIUM_ZINK
+   zink = false;
+#endif
+#ifndef GALLIUM_RADEONSI
+   radeonsi = false;
+#endif
+   if (!zink && !radeonsi)
       return -10;
 
    /* The framebuffer object is the one bound for drawing, as it is when a
@@ -878,18 +896,36 @@ summit_haiku_present_framebuffer(unsigned framebuffer,
    if (rb == NULL || rb->texture == NULL)
       return -11;
 
-   return zink_haiku_present(st->pipe, rb->texture, present);
+#ifdef GALLIUM_ZINK
+   if (zink)
+      return zink_haiku_present(st->pipe, rb->texture, present);
+#endif
+#ifdef GALLIUM_RADEONSI
+   if (radeonsi)
+      return haiku_drm_present(st->pipe, rb->texture, present);
+#endif
+   return -10;
 }
 
 extern "C" __attribute__((visibility("default"))) void
 summit_haiku_present_wait_idle(void)
 {
+#ifdef GALLIUM_ZINK
    zink_haiku_present_wait_idle();
+#endif
+#ifdef GALLIUM_RADEONSI
+   haiku_drm_present_wait_idle();
+#endif
 }
 
 extern "C" __attribute__((visibility("default"))) void
 summit_haiku_present_release(void)
 {
+#ifdef GALLIUM_ZINK
    zink_haiku_present_release(NULL);
+#endif
+#ifdef GALLIUM_RADEONSI
+   haiku_drm_present_release(NULL);
+#endif
 }
 #endif

@@ -1624,6 +1624,14 @@ static struct pb_buffer_lean *amdgpu_bo_from_handle(struct radeon_winsys *rws,
    case WINSYS_HANDLE_TYPE_FD:
       type = amdgpu_bo_handle_type_dma_buf_fd;
       break;
+#ifdef __HAIKU__
+   case WINSYS_HANDLE_TYPE_KMS:
+      /* A handle on this file, such as the screen's frame buffer that
+       * amdgpu_drm hands out (DRM_HAIKU_IOCTL_SCANOUT): libdrm on Haiku
+       * takes it over. */
+      type = amdgpu_bo_handle_type_kms;
+      break;
+#endif
    default:
       return NULL;
    }

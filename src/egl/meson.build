@@ -154,6 +154,8 @@ elif with_platform_haiku
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl, libglapi]
   deps_for_egl += [cpp.find_library('be'), driver_swrast, driver_panfrost, driver_zink, idep_xmlconfig]
   if with_gallium_radeonsi
+    # Summit's present into the screen (haiku_drm_present.h)
+    files_egl += files('drivers/haiku/haiku_drm_present.c')
     # radeonsi's video code is in the Gallium video library
     link_for_egl += [libgalliumvl]
     deps_for_egl += [driver_radeonsi, dep_libdrm]

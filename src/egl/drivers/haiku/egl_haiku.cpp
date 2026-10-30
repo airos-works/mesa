@@ -152,7 +152,7 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
       _eglError(EGL_BAD_NATIVE_WINDOW, "Haiku EGL needs a BitmapHook");
       return NULL;
    }
-   printf("haiku_create_window_surface\n");
+   TRACE("haiku_create_window_surface\n");
    struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
 
    struct haiku_egl_surface *wgl_surf =
@@ -193,7 +193,7 @@ static _EGLSurface *
 haiku_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
                             void *native_pixmap, const EGLint *attrib_list)
 {
-   printf("haiku_create_pixmap_surface\n");
+   TRACE("haiku_create_pixmap_surface\n");
    return NULL;
 }
 
@@ -201,7 +201,7 @@ static _EGLSurface *
 haiku_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf,
                              const EGLint *attrib_list)
 {
-   printf("haiku_create_pbuffer_surface\n");
+   TRACE("haiku_create_pbuffer_surface\n");
    struct haiku_egl_display *hgl_dpy = haiku_egl_display(disp);
 
    struct haiku_egl_surface *wgl_surf =

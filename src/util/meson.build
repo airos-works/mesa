@@ -89,6 +89,8 @@ files_mesa_util = files(
   'perf/u_trace.h',
   'perf/u_trace.c',
   'perf/u_trace_priv.h',
+  'summit_parallel_copy.c',
+  'summit_parallel_copy.h',
   'u_process.c',
   'u_process.h',
   'u_qsort.cpp',

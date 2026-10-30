@@ -35,6 +35,7 @@
 #include "c11/threads.h"
 #include "util/detect_arch.h"
 #include "util/format/u_format.h"
+#include "util/summit_parallel_copy.h"
 #include "util/format/u_format_s3tc.h"
 #include "util/u_math.h"
 #include "util/perf/cpu_trace.h"
@@ -83,6 +84,14 @@ util_copy_rect(void * dst_in,
    dst += dst_y * dst_stride;
    src += src_y * src_stride_pos;
    width *= blocksize;
+
+   /* Summit: what a browser uploads here are tiles of 256x256 pixels and
+    * video frames, into staging memory the GPU reads next.
+    */
+   if (src_stride > 0 && (uint64_t)height * width >= 128 * 1024) {
+      summit_copy_rows(dst, dst_stride, src, src_stride, width, height);
+      return;
+   }
 
    if (width == dst_stride && width == (unsigned)src_stride) {
       uint64_t size = (uint64_t)height * width;

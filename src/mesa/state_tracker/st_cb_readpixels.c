@@ -30,6 +30,7 @@
 #include "main/pbo.h"
 
 #include "main/readpix.h"
+#include "util/summit_parallel_copy.h"
 #include "main/enums.h"
 #include "main/framebuffer.h"
 #include "main/renderbuffer.h"
@@ -550,17 +551,8 @@ st_ReadPixels(struct gl_context *ctx, GLint x, GLint y,
                                          width, height, format,
                                          type, 0, 0);
 
-      if (tex_xfer->stride == bytesPerRow && destStride == bytesPerRow) {
-         memcpy(dest, map, bytesPerRow * height);
-      } else {
-         GLuint row;
-
-         for (row = 0; row < (unsigned) height; row++) {
-            memcpy(dest, map, bytesPerRow);
-            map += tex_xfer->stride;
-            dest += destStride;
-         }
-      }
+      summit_copy_rows(dest, destStride, map, tex_xfer->stride,
+                       bytesPerRow, height);
    }
 
    pipe_texture_unmap(pipe, tex_xfer);

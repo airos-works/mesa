@@ -44,7 +44,11 @@ typedef unsigned int drm_handle_t;
 #else /* One of the BSDs */
 
 #include <stdint.h>
+#ifdef __HAIKU__
+#include <bsd/sys/ioccom.h>
+#else
 #include <sys/ioccom.h>
+#endif
 #include <sys/types.h>
 typedef int8_t   __s8;
 typedef uint8_t  __u8;

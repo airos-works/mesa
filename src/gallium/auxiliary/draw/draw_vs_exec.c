@@ -209,6 +209,13 @@ vs_exec_run_linear(struct draw_vertex_shader *shader,
 static void
 vs_exec_delete(struct draw_vertex_shader *dvs)
 {
+   struct exec_vertex_shader *evs = exec_vertex_shader(dvs);
+   /* The machine caches expanded instructions by the token address. Retiring
+    * that address must invalidate the cache before the allocator can reuse it
+    * for a different shader, including after draw_bind_vertex_shader(NULL).
+    */
+   if (evs->machine->Tokens == dvs->state.tokens)
+      tgsi_exec_machine_bind_shader(evs->machine, NULL, NULL, NULL, NULL);
    FREE((void*) dvs->state.tokens);
    FREE(dvs);
 }

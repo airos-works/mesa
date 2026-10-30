@@ -65,8 +65,11 @@ hgl_st_framebuffer_flush_front(struct st_context *st,
 	if (statt != ST_ATTACHMENT_FRONT_LEFT)
 		return false;
 
-	if (!ptex)
+	/* Pbuffers have no window hook or presentation target. */
+	if (!ptex || !buffer->winsysContext)
 		return true;
+	if (buffer->present)
+		return buffer->present(st->pipe, buffer, ptex);
 
 	// TODO: pipe_context here??? Might be needed for hw renderers
 	buffer->screen->flush_frontbuffer(buffer->screen, NULL, ptex, 0, 0,
@@ -114,7 +117,9 @@ hgl_st_framebuffer_validate_textures(struct pipe_frontend_drawable *drawable,
 				case ST_ATTACHMENT_FRONT_RIGHT:
 				case ST_ATTACHMENT_BACK_RIGHT:
 					format = buffer->visual.color_format;
-					bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET;
+					bind = PIPE_BIND_RENDER_TARGET;
+					if (buffer->winsysContext && !buffer->present)
+						bind |= PIPE_BIND_DISPLAY_TARGET;
 					break;
 				case ST_ATTACHMENT_DEPTH_STENCIL:
 					format = buffer->visual.depth_stencil_format;
@@ -163,6 +168,8 @@ hgl_st_framebuffer_validate(struct st_context *st,
 	CALLED();
 
 	buffer = hgl_st_framebuffer(drawable);
+	if (buffer->update_size)
+		buffer->update_size(buffer);
 
 	// Build mask of current attachments
 	stAttachmentMask = 0;
@@ -223,7 +230,8 @@ hgl_create_st_framebuffer(struct hgl_display *display, struct st_visual* visual,
 	assert(visual);
 
 	buffer = CALLOC_STRUCT(hgl_buffer);
-	assert(buffer);
+	if (!buffer)
+		return NULL;
 
 	// Prepare our buffer
 	buffer->visual = *visual;
@@ -252,6 +260,7 @@ void
 hgl_destroy_st_framebuffer(struct hgl_buffer *buffer)
 {
 	CALLED();
+	st_api_destroy_drawable(&buffer->base);
 
 	int i;
 	for (i = 0; i < ST_ATTACHMENT_COUNT; i++)
@@ -264,10 +273,6 @@ hgl_destroy_st_framebuffer(struct hgl_buffer *buffer)
 struct hgl_context*
 hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct st_context* shared)
 {
-	struct hgl_context* context = CALLOC_STRUCT(hgl_context);
-	assert(context);
-	context->display = display;
-
 	struct st_context_attribs attribs;
 	memset(&attribs, 0, sizeof(attribs));
 	attribs.options.force_glsl_extensions_warn = false;
@@ -277,7 +282,22 @@ hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct
 	attribs.minor = 0;
 
 	enum st_context_error result;
-	context->st = st_api_create_context(display->fscreen, &attribs, &result, shared);
+	return hgl_create_context_attribs(display, &attribs, shared, &result);
+}
+
+
+struct hgl_context*
+hgl_create_context_attribs(struct hgl_display *display,
+	const struct st_context_attribs *attribs, struct st_context *shared,
+	enum st_context_error *error)
+{
+	struct hgl_context* context = CALLOC_STRUCT(hgl_context);
+	if (!context) {
+		*error = ST_CONTEXT_ERROR_NO_MEMORY;
+		return NULL;
+	}
+	context->display = display;
+	context->st = st_api_create_context(display->fscreen, attribs, error, shared);
 	if (context->st == NULL) {
 		FREE(context);
 		return NULL;
@@ -299,13 +319,14 @@ hgl_create_context(struct hgl_display *display, struct st_visual* visual, struct
 void
 hgl_destroy_context(struct hgl_context* context)
 {
+	/* Postprocessing owns resources in the still-live pipe context. */
+	if (context->postProcess)
+		pp_free(context->postProcess);
+
 	if (context->st) {
 		st_context_flush(context->st, 0, NULL, NULL, NULL);
 		st_destroy_context(context->st);
 	}
-
-	if (context->postProcess)
-		pp_free(context->postProcess);
 
 	FREE(context);
 }
@@ -317,6 +338,7 @@ hgl_get_st_visual(struct st_visual* visual, ulong options)
 	CALLED();
 
 	assert(visual);
+	memset(visual, 0, sizeof(*visual));
 
 	// Determine color format
 	if ((options & HGL_INDEX) != 0) {
@@ -365,9 +387,13 @@ hgl_create_display(struct pipe_screen* screen)
 	struct hgl_display* display;
 
 	display = CALLOC_STRUCT(hgl_display);
-	assert(display);
+	if (!display)
+		return NULL;
 	display->fscreen = CALLOC_STRUCT(pipe_frontend_screen);
-	assert(display->fscreen);
+	if (!display->fscreen) {
+		FREE(display);
+		return NULL;
+	}
 	display->fscreen->screen = screen;
 	display->fscreen->get_param = hgl_st_manager_get_param;
 	// display->fscreen->st_screen is used by llvmpipe

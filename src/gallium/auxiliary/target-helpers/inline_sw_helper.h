@@ -29,6 +29,12 @@
 #include "d3d12/d3d12_public.h"
 #endif
 
+/* sw_helper.h declares zink the same way; this header left it out, so every
+ * target that reaches zink through it failed to compile. */
+#ifdef GALLIUM_ZINK
+#include "zink/zink_public.h"
+#endif
+
 static inline struct pipe_screen *
 sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
 {

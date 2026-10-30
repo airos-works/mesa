@@ -4,6 +4,9 @@
 		MesaGLInteropEGLQueryDeviceInfo;
 		MesaGLInteropEGLExportObject;
 		MesaGLInteropEGLFlushObjects;
+		summit_haiku_present_framebuffer;
+		summit_haiku_present_wait_idle;
+		summit_haiku_present_release;
 	local:
 		*;
 };

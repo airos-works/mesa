@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -54,6 +55,10 @@
 #include "hgl_context.h"
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
+#endif
+#ifdef GALLIUM_ZINK
+#include "main/mtypes.h"
+#include "zink/zink_haiku_present.h"
 #endif
 
 #include <Bitmap.h>
@@ -432,6 +437,9 @@ haiku_display_destroy(_EGLDisplay *disp)
 
    _eglCleanupDisplay(disp);
    struct pipe_screen *screen = hgl_dpy->disp->fscreen->screen;
+#ifdef GALLIUM_ZINK
+   zink_haiku_present_release(screen);
+#endif
    hgl_destroy_display(hgl_dpy->disp);
    hgl_dpy->disp = NULL;
    screen->destroy(screen); // destroy will deallocate object
@@ -776,3 +784,51 @@ extern "C" const _EGLDriver _eglDriver = {
    .QuerySurface = haiku_query_surface,
    .SwapBuffers = haiku_swap_buffers,
 };
+
+
+#ifdef GALLIUM_ZINK
+/* Summit's web process composites each page into a framebuffer object and
+ * hands the result to the window system. With a direct window on the screen
+ * it can be copied there by the GPU instead of being read back: see
+ * zink_haiku_present.h. Found with dlsym(), so EGL's dispatch tables stay as
+ * they are. The framebuffer object must be bound for drawing. Returns 0 when
+ * the copies were submitted, a negative number when the caller has to present
+ * some other way (-10: no current context or not a Zink one, -11: that
+ * framebuffer object is not bound or has no colour renderbuffer). */
+extern "C" __attribute__((visibility("default"))) int
+summit_haiku_present_framebuffer(unsigned framebuffer,
+                                 const struct summit_haiku_present *present)
+{
+   _EGLContext *current = _eglGetCurrentContext();
+   if (current == NULL || haiku_egl_context(current)->ctx == NULL)
+      return -10;
+   struct st_context *st = haiku_egl_context(current)->ctx->st;
+   struct pipe_screen *screen = st->screen;
+   if (screen == NULL || screen->get_name == NULL
+       || strncmp(screen->get_name(screen), "zink", 4) != 0)
+      return -10;
+
+   /* The framebuffer object is the one bound for drawing, as it is when a
+    * frame has just been composited into it. */
+   struct gl_framebuffer *fb = st->ctx->DrawBuffer;
+   if (fb == NULL || framebuffer == 0 || fb->Name != framebuffer)
+      return -11;
+   struct gl_renderbuffer *rb = fb->Attachment[BUFFER_COLOR0].Renderbuffer;
+   if (rb == NULL || rb->texture == NULL)
+      return -11;
+
+   return zink_haiku_present(st->pipe, rb->texture, present);
+}
+
+extern "C" __attribute__((visibility("default"))) void
+summit_haiku_present_wait_idle(void)
+{
+   zink_haiku_present_wait_idle();
+}
+
+extern "C" __attribute__((visibility("default"))) void
+summit_haiku_present_release(void)
+{
+   zink_haiku_present_release(NULL);
+}
+#endif

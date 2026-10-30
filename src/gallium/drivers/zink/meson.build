@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 files_libzink = files(
+  'zink_haiku_present.c',
   'zink_lower_cubemap_to_array.c',
   'nir_to_spirv/nir_to_spirv.c',
   'nir_to_spirv/spirv_builder.c',

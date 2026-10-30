@@ -23,7 +23,17 @@ extern "C" {
 struct pipe_context;
 struct pipe_resource;
 
-#define SUMMIT_HAIKU_PRESENT_VERSION 1
+/* Version 2 adds flags and before_copy; a version 1 request is still taken. */
+#define SUMMIT_HAIKU_PRESENT_VERSION 2
+
+/* The copies are made on the helper thread, not in the caller's batch: the
+ * call only adds a copy of the frame into one of a few frames of Mesa's own
+ * in video memory to the caller's work and returns without waiting for the
+ * GPU. The helper waits for that work, asks before_copy whether and when to
+ * copy (a caller that times copies to the monitor's scan waits there), and
+ * then submits the copies into the screen on their own. The caller's next
+ * frame is composited meanwhile. */
+#define SUMMIT_HAIKU_PRESENT_DEFERRED 0x1
 
 struct summit_haiku_present {
    uint32_t version;              /* SUMMIT_HAIKU_PRESENT_VERSION */
@@ -50,15 +60,32 @@ struct summit_haiku_present {
     * copies (or at once if there was nothing to copy). May be NULL. */
    void (*completed)(void *cookie);
    void *cookie;
+   /* Version 2. */
+   uint32_t flags;                /* SUMMIT_HAIKU_PRESENT_DEFERRED */
+   /* With SUMMIT_HAIKU_PRESENT_DEFERRED, called on the helper thread once
+    * the frame is finished on the GPU, right before its copies are
+    * submitted. attempt 0 is called with nothing held, and may wait as long
+    * as it likes. Then the helper takes the GPU's queue and waits until the
+    * work other threads submitted meanwhile has finished, and calls it again
+    * (attempt 1) holding the queue: the copies start as soon as that returns,
+    * so they still start at a moment it chose. It should return at once
+    * unless that work took long; other submissions wait meanwhile. A
+    * non-zero return drops this present's copies (the screen keeps what it
+    * had; completed is still called). May be NULL. */
+   int (*before_copy)(void *cookie, uint32_t attempt);
 };
 
 /* Returns 0 when the copies were submitted, a negative number when this
  * present cannot go to the screen (the caller then presents some other way):
  * -1 bad arguments, -2 unsupported image format, -3 no frame buffer to be had
  * or it is not the one described, -4 the window system's copy could not be
- * imported, -5 nothing visible. */
+ * imported, -5 nothing visible, -6 a deferred present could not get Mesa's
+ * own frames in video memory (nothing was done: present without the flag). */
 int zink_haiku_present(struct pipe_context *pipe, struct pipe_resource *image,
                        const struct summit_haiku_present *present);
+
+/* The highest SUMMIT_HAIKU_PRESENT_VERSION this Mesa takes. */
+int zink_haiku_present_version(void);
 
 /* Waits until every present submitted so far has finished on the GPU. */
 void zink_haiku_present_wait_idle(void);

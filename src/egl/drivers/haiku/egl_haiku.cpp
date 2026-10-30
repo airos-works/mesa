@@ -820,6 +820,14 @@ summit_haiku_present_framebuffer(unsigned framebuffer,
    return zink_haiku_present(st->pipe, rb->texture, present);
 }
 
+/* The highest struct summit_haiku_present version taken: 2 has
+ * SUMMIT_HAIKU_PRESENT_DEFERRED. A Mesa without this takes only version 1. */
+extern "C" __attribute__((visibility("default"))) int
+summit_haiku_present_version(void)
+{
+   return zink_haiku_present_version();
+}
+
 extern "C" __attribute__((visibility("default"))) void
 summit_haiku_present_wait_idle(void)
 {

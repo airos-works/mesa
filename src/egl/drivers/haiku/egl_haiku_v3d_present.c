@@ -33,6 +33,8 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 #include "util/format/u_format.h"
+#include "util/box.h"
+#include "util/u_atomic.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_sampler.h"
@@ -48,6 +50,7 @@
 #define MAX_QUEUED 16
 #define BLOCK_WIDTH 16
 #define BLOCK_HEIGHT 4
+#define PIXELS_PER_INVOCATION 4
 
 /* rpi_display's interface (headers/private/graphics/rpi_display in the
  * air/OS tree), as far as this needs it. */
@@ -83,6 +86,7 @@ struct copy_params {
 
 struct completion {
    int token;
+   bigtime_t submitted;
    void (*completed)(void *cookie);
    void *cookie;
    unsigned back_count;
@@ -126,6 +130,30 @@ static struct {
 };
 
 
+/* HAIKU_V3D_PRESENT_TRACE=1: where each present's time goes, every 10. */
+static bool
+trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *value = getenv("HAIKU_V3D_PRESENT_TRACE");
+      enabled = value && strcmp(value, "0") != 0;
+   }
+   return enabled;
+}
+
+static struct {
+   unsigned count;
+   bigtime_t before, dispatch, gpu, after;
+} trace;
+
+static void
+trace_add(bigtime_t *field, bigtime_t time)
+{
+   if (trace_enabled())
+      p_atomic_add(field, time);
+}
+
 static void *
 completion_thread(void *data)
 {
@@ -141,11 +169,21 @@ completion_thread(void *data)
 
       if (entry->token >= 0)
          v3d_haiku_wait_job_token(screen, entry->token, -1);
+      bigtime_t done = system_time();
+      trace_add(&trace.gpu, done - entry->submitted);
       /* What the CPU may hold of the rectangles the GPU just wrote goes;
        * later presents may already be writing elsewhere. */
       if (entry->back_count != 0 && back != NULL)
          v3d_haiku_prepare_ranges(back, entry->back_ranges,
                                   entry->back_count, true);
+      trace_add(&trace.after, system_time() - done);
+      if (trace_enabled() && p_atomic_inc_return(&trace.count) % 10 == 0) {
+         fprintf(stderr, "haiku v3d present: per present %.2f ms cache before, "
+                 "%.2f ms dispatch, %.2f ms submit to done, %.2f ms cache after\n",
+                 trace.before / 10000.0, trace.dispatch / 10000.0,
+                 trace.gpu / 10000.0, trace.after / 10000.0);
+         trace.before = trace.dispatch = trace.gpu = trace.after = 0;
+      }
       if (entry->completed != NULL)
          entry->completed(entry->cookie);
 
@@ -267,9 +305,9 @@ acquire_back(void *bits, uint64_t size)
 }
 
 
-/* gl_GlobalInvocationID.xy within width x height: texel (src_x + x,
- * src_y + y) as a B, G, R, A pixel into each target asked for, at
- * offset + y * stride + x * 4. */
+/* gl_GlobalInvocationID.xy over (width / PIXELS_PER_INVOCATION) x height:
+ * texels (src_x + x, src_y + y) as B, G, R, A pixels into each target asked
+ * for, at offset + y * stride + x * 4. */
 static void *
 create_shader(struct pipe_context *pipe)
 {
@@ -306,41 +344,64 @@ create_shader(struct pipe_context *pipe)
    nir_def *x = nir_channel(&b, id, 0);
    nir_def *y = nir_channel(&b, id, 1);
 
-   nir_push_if(&b, nir_iand(&b, nir_ult(&b, x, nir_channel(&b, p0, 2)),
+   /* Each invocation copies PIXELS_PER_INVOCATION pixels of a row: the V3D
+    * writes 16 bytes with one TMU store about as fast as 4 with one, and a
+    * pixel a store ran at 180 MB/s. */
+   nir_def *width = nir_channel(&b, p0, 2);
+   nir_def *first = nir_imul_imm(&b, x, PIXELS_PER_INVOCATION);
+   nir_push_if(&b, nir_iand(&b, nir_ult(&b, first, width),
                                 nir_ult(&b, y, nir_channel(&b, p0, 3))));
    {
-      nir_def *coord = nir_vec2(&b, nir_iadd(&b, nir_channel(&b, p0, 0), x),
-                                    nir_iadd(&b, nir_channel(&b, p0, 1), y));
-      nir_def *texel = nir_txf(&b, coord, .lod = zero, .texture_index = 0,
-                               .sampler_index = 0,
-                               .dim = GLSL_SAMPLER_DIM_2D,
-                               .dest_type = nir_type_float32);
-      nir_def *bytes = nir_f2u32(&b, nir_fround_even(&b,
-         nir_fmul_imm(&b, nir_fsat(&b, texel), 255.0)));
-      /* B, G, R, A in memory: the screen's B_RGB32 */
-      nir_def *pixel = nir_ior(&b,
-         nir_ior(&b, nir_channel(&b, bytes, 2),
-                     nir_ishl_imm(&b, nir_channel(&b, bytes, 1), 8)),
-         nir_ior(&b, nir_ishl_imm(&b, nir_channel(&b, bytes, 0), 16),
-                     nir_ishl_imm(&b, nir_channel(&b, bytes, 3), 24)));
-      nir_def *column = nir_imul_imm(&b, x, 4);
+      nir_def *last = nir_iadd_imm(&b, width, -1);
+      nir_def *row = nir_iadd(&b, nir_channel(&b, p0, 1), y);
+      nir_def *pixels[PIXELS_PER_INVOCATION];
+      for (int k = 0; k < PIXELS_PER_INVOCATION; k++) {
+         /* past the rectangle's end: fetched in it, never stored */
+         nir_def *column = nir_umin(&b, nir_iadd_imm(&b, first, k), last);
+         nir_def *coord = nir_vec2(&b,
+            nir_iadd(&b, nir_channel(&b, p0, 0), column), row);
+         nir_def *texel = nir_txf(&b, coord, .lod = zero, .texture_index = 0,
+                                  .sampler_index = 0,
+                                  .dim = GLSL_SAMPLER_DIM_2D,
+                                  .dest_type = nir_type_float32);
+         nir_def *bytes = nir_f2u32(&b, nir_fround_even(&b,
+            nir_fmul_imm(&b, nir_fsat(&b, texel), 255.0)));
+         /* B, G, R, A in memory: the screen's B_RGB32 */
+         pixels[k] = nir_ior(&b,
+            nir_ior(&b, nir_channel(&b, bytes, 2),
+                        nir_ishl_imm(&b, nir_channel(&b, bytes, 1), 8)),
+            nir_ior(&b, nir_ishl_imm(&b, nir_channel(&b, bytes, 0), 16),
+                        nir_ishl_imm(&b, nir_channel(&b, bytes, 3), 24)));
+      }
+      nir_def *all = nir_vec(&b, pixels, PIXELS_PER_INVOCATION);
+      nir_def *whole = nir_ult(&b, nir_iadd_imm(&b, first,
+                                                PIXELS_PER_INVOCATION - 1),
+                               width);
+      nir_def *column_bytes = nir_imul_imm(&b, first, 4);
       nir_def *targets = nir_channel(&b, p2, 0);
 
-      nir_push_if(&b, nir_i2b(&b, nir_iand_imm(&b, targets, 1)));
-      nir_store_ssbo(&b, pixel, nir_imm_int(&b, 0),
-                     nir_iadd(&b, nir_channel(&b, p1, 0),
-                              nir_iadd(&b, nir_imul(&b, y, nir_channel(&b, p1, 1)),
-                                       column)),
-                     .write_mask = 0x1, .align_mul = 4);
-      nir_pop_if(&b, NULL);
-
-      nir_push_if(&b, nir_i2b(&b, nir_iand_imm(&b, targets, 2)));
-      nir_store_ssbo(&b, pixel, nir_imm_int(&b, 1),
-                     nir_iadd(&b, nir_channel(&b, p1, 2),
-                              nir_iadd(&b, nir_imul(&b, y, nir_channel(&b, p1, 3)),
-                                       column)),
-                     .write_mask = 0x1, .align_mul = 4);
-      nir_pop_if(&b, NULL);
+      for (int target = 0; target < 2; target++) {
+         nir_push_if(&b, nir_i2b(&b, nir_iand_imm(&b, targets, 1 << target)));
+         nir_def *start = nir_iadd(&b, nir_channel(&b, p1, 2 * target),
+            nir_iadd(&b, nir_imul(&b, y, nir_channel(&b, p1, 2 * target + 1)),
+                     column_bytes));
+         nir_def *index = nir_imm_int(&b, target);
+         nir_push_if(&b, whole);
+         nir_store_ssbo(&b, all, index, start,
+                        .write_mask = (1 << PIXELS_PER_INVOCATION) - 1,
+                        .align_mul = 4);
+         nir_push_else(&b, NULL);
+         /* the rectangle's last pixels, one by one */
+         for (int k = 0; k < PIXELS_PER_INVOCATION - 1; k++) {
+            nir_push_if(&b, nir_ult(&b, nir_iadd_imm(&b, first, k), width));
+            nir_store_ssbo(&b, pixels[k], index,
+                           nir_iadd_imm(&b, start, 4 * k),
+                           .write_mask = 0x1, .align_mul = 4);
+            nir_pop_if(&b, NULL);
+         }
+         nir_pop_if(&b, NULL);
+         nir_pop_if(&b, NULL);
+      }
    }
    nir_pop_if(&b, NULL);
 
@@ -379,6 +440,10 @@ clip_rect(const int32_t *r, int32_t origin_x, int32_t origin_y,
 }
 
 
+/* The V3D compiler reads a shader's UBO n from constant buffer n + 1
+ * (QUNIFORM_UBO_ADDR): 0 is the default uniform block. */
+#define PARAMS_CONSTANT_BUFFER 1
+
 static void
 dispatch(struct pipe_context *pipe, const struct copy_params *params)
 {
@@ -386,13 +451,96 @@ dispatch(struct pipe_context *pipe, const struct copy_params *params)
       .buffer_size = sizeof(*params),
       .user_buffer = params,
    };
-   pipe->set_constant_buffer(pipe, MESA_SHADER_COMPUTE, 0, &cb);
+   pipe->set_constant_buffer(pipe, MESA_SHADER_COMPUTE,
+                             PARAMS_CONSTANT_BUFFER, &cb);
    struct pipe_grid_info info = {
       .block = { BLOCK_WIDTH, BLOCK_HEIGHT, 1 },
-      .grid = { DIV_ROUND_UP(params->width, BLOCK_WIDTH),
+      .grid = { DIV_ROUND_UP(params->width,
+                             BLOCK_WIDTH * PIXELS_PER_INVOCATION),
                 DIV_ROUND_UP(params->height, BLOCK_HEIGHT), 1 },
    };
    pipe->launch_grid(pipe, &info);
+}
+
+
+/* A rectangle of the image blitted into one target through the V3D's tile
+ * buffer: a linear render target over the target's memory there. */
+struct blit_copy {
+   unsigned target;               /* 0 front, 1 back */
+   uint32_t src_x, src_y, width, height;
+   uint64_t offset;
+   uint32_t stride;
+};
+
+static bool
+blits_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *value = getenv("HAIKU_V3D_PRESENT_BLIT");
+      enabled = !value || strcmp(value, "0") != 0;
+   }
+   return enabled;
+}
+
+/* The copies of rectangle c (left, top, width, height in the target) of a
+ * target with the given row length. Tile buffer stores write rows in whole
+ * 16 pixels and in groups of 4, and much faster than the compute shader's
+ * stores (98 against about 20 ms a 3840x2160 frame): the interior that
+ * starts on a 16 pixel column (64 bytes) and spans whole groups is blitted,
+ * the strips around it, which a store must not spill out of, are copied by
+ * the compute shader. */
+static void
+add_copies(unsigned target, const int32_t *c, int32_t origin_x,
+           int32_t origin_y, uint32_t front_stride, uint32_t back_stride,
+           struct copy_params *copies, unsigned *copy_count,
+           struct blit_copy *blits, unsigned *blit_count)
+{
+   const uint32_t stride = target == 0 ? front_stride : back_stride;
+   const int32_t left = c[0], top = c[1], right = c[0] + c[2];
+   int32_t inner_left = align(left, 16);
+   int32_t inner_width = (right - inner_left) & ~15;
+   int32_t inner_height = c[3] & ~3;
+   if (!blits_enabled() || stride % 64 != 0 || inner_width <= 0
+       || inner_height <= 0) {
+      inner_left = left;
+      inner_width = inner_height = 0;
+   }
+   if (inner_width > 0) {
+      blits[(*blit_count)++] = (struct blit_copy) {
+         .target = target,
+         .src_x = inner_left - origin_x,
+         .src_y = top - origin_y,
+         .width = inner_width,
+         .height = inner_height,
+         .offset = (uint64_t)top * stride + inner_left * 4,
+         .stride = stride,
+      };
+   }
+   /* left, right and bottom strips (the whole rectangle without a blit) */
+   const int32_t strips[3][4] = {
+      { left, top, inner_left - left, inner_width > 0 ? c[3] : 0 },
+      { inner_left + inner_width, top, right - inner_left - inner_width,
+        c[3] },
+      { inner_left, top + inner_height, inner_width,
+        c[3] - inner_height },
+   };
+   for (int i = 0; i < 3; i++) {
+      const int32_t *strip = strips[i];
+      if (strip[2] <= 0 || strip[3] <= 0)
+         continue;
+      copies[(*copy_count)++] = (struct copy_params) {
+         .src_x = strip[0] - origin_x,
+         .src_y = strip[1] - origin_y,
+         .width = strip[2],
+         .height = strip[3],
+         .front_offset = strip[1] * front_stride + strip[0] * 4,
+         .front_stride = front_stride,
+         .back_offset = strip[1] * back_stride + strip[0] * 4,
+         .back_stride = back_stride,
+         .targets = 1u << target,
+      };
+   }
 }
 
 
@@ -470,10 +618,10 @@ haiku_v3d_present(struct st_context *st, struct pipe_resource *image,
       }
    }
 
-   /* The copies, rectangle by rectangle, into both targets at once where
-    * both clip it alike. */
-   static struct copy_params copies[2 * MAX_RECTS];
-   unsigned copy_count = 0;
+   /* The copies, rectangle by rectangle and target by target. */
+   static struct copy_params copies[2 * 3 * MAX_RECTS];
+   static struct blit_copy blits[2 * MAX_RECTS];
+   unsigned copy_count = 0, blit_count = 0;
    unsigned tail = (state.queue_head + state.queue_count) % MAX_QUEUED;
    struct completion *entry = &state.queue[tail];
    entry->back_count = 0;
@@ -494,91 +642,113 @@ haiku_v3d_present(struct st_context *st, struct pipe_resource *image,
             .stride = p->back_bytes_per_row,
          };
       }
-      bool together = to_front && to_back && memcmp(front, back,
-                                                    sizeof(front)) == 0;
-      for (int target = 0; target < 2; target++) {
-         const int32_t *c = target == 0 ? front : back;
-         if (!(target == 0 ? to_front : to_back) || (target == 1 && together))
-            continue;
-         copies[copy_count++] = (struct copy_params) {
-            .src_x = c[0] - p->origin_x,
-            .src_y = c[1] - p->origin_y,
-            .width = c[2],
-            .height = c[3],
-            .front_offset = c[1] * state.front_bytes_per_row + c[0] * 4,
-            .front_stride = state.front_bytes_per_row,
-            .back_offset = c[1] * p->back_bytes_per_row + c[0] * 4,
-            .back_stride = p->back_bytes_per_row,
-            .targets = together ? 3 : target == 0 ? 1 : 2,
-         };
-      }
+      if (to_front)
+         add_copies(0, front, p->origin_x, p->origin_y,
+                    state.front_bytes_per_row, p->back_bytes_per_row,
+                    copies, &copy_count, blits, &blit_count);
+      if (to_back)
+         add_copies(1, back, p->origin_x, p->origin_y,
+                    state.front_bytes_per_row, p->back_bytes_per_row,
+                    copies, &copy_count, blits, &blit_count);
    }
-   if (copy_count == 0) {
+   if (copy_count == 0 && blit_count == 0) {
       pthread_mutex_unlock(&state.lock);
       return -5;
    }
 
    /* What the CPU wrote there must not be written back over the copies
     * later. */
+   bigtime_t before = system_time();
    if (entry->back_count != 0 && state.back_cached)
       v3d_haiku_prepare_ranges(state.back, entry->back_ranges,
                                entry->back_count, true);
+   bigtime_t dispatched = system_time();
+   trace_add(&trace.before, dispatched - before);
    if (!state.back_cached)
       entry->back_count = 0;
 
-   struct cso_context *cso = st->cso_context;
-   cso_save_compute_state(cso, CSO_BIT_COMPUTE_SHADER
-                               | CSO_BIT_COMPUTE_SAMPLERS);
-   cso_set_compute_shader_handle(cso, state.shader);
-
-   struct pipe_sampler_view templ;
-   u_sampler_view_default_template(&templ, image,
-                                   util_format_linear(image->format));
-   struct pipe_sampler_view *view = pipe->create_sampler_view(pipe, image,
-                                                              &templ);
-   if (view == NULL) {
-      cso_restore_compute_state(cso);
-      pthread_mutex_unlock(&state.lock);
-      return -1;
+   /* The blits: the driver saves and restores the state it changes. */
+   for (unsigned i = 0; i < blit_count; i++) {
+      const struct blit_copy *b = &blits[i];
+      struct pipe_resource *view = v3d_haiku_linear_view(
+         b->target == 0 ? state.front : state.back, b->offset, b->width,
+         b->height, b->stride);
+      if (view == NULL)
+         continue;
+      struct pipe_blit_info blit = {};
+      blit.src.resource = image;
+      blit.src.format = util_format_linear(image->format);
+      u_box_2d(b->src_x, b->src_y, b->width, b->height, &blit.src.box);
+      blit.dst.resource = view;
+      blit.dst.format = view->format;
+      u_box_2d(0, 0, b->width, b->height, &blit.dst.box);
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      pipe->blit(pipe, &blit);
+      pipe_resource_reference(&view, NULL);
    }
-   pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 1, 0, &view);
-   struct pipe_sampler_state sampler = {
-      .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-      .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-      .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-      .min_img_filter = PIPE_TEX_FILTER_NEAREST,
-      .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
-   };
-   const struct pipe_sampler_state *samplers[1] = { &sampler };
-   cso_set_samplers(cso, MESA_SHADER_COMPUTE, 1, samplers);
+   if (blit_count != 0)
+      pipe->flush(pipe, NULL, 0);
 
-   /* A copy into one target only still has both bound. */
-   struct pipe_resource *front_buffer = has_front ? state.front : state.back;
-   struct pipe_resource *back_buffer = has_back ? state.back : state.front;
-   struct pipe_shader_buffer buffers[2] = {
-      { .buffer = front_buffer, .buffer_size = front_buffer->width0 },
-      { .buffer = back_buffer, .buffer_size = back_buffer->width0 },
-   };
-   pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 2, buffers, 0x3);
+   if (copy_count != 0) {
+      struct cso_context *cso = st->cso_context;
+      cso_save_compute_state(cso, CSO_BIT_COMPUTE_SHADER
+                                  | CSO_BIT_COMPUTE_SAMPLERS);
+      cso_set_compute_shader_handle(cso, state.shader);
 
-   for (unsigned i = 0; i < copy_count; i++)
-      dispatch(pipe, &copies[i]);
+      struct pipe_sampler_view templ;
+      u_sampler_view_default_template(&templ, image,
+                                      util_format_linear(image->format));
+      struct pipe_sampler_view *view = pipe->create_sampler_view(pipe, image,
+                                                                 &templ);
+      if (view == NULL) {
+         cso_restore_compute_state(cso);
+         pthread_mutex_unlock(&state.lock);
+         return -1;
+      }
+      pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 1, 0, &view);
+      struct pipe_sampler_state sampler = {
+         .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .min_img_filter = PIPE_TEX_FILTER_NEAREST,
+         .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
+      };
+      const struct pipe_sampler_state *samplers[1] = { &sampler };
+      cso_set_samplers(cso, MESA_SHADER_COMPUTE, 1, samplers);
 
-   pipe->sampler_view_release(pipe, view);
-   cso_restore_compute_state(cso);
-   /* Unbound by hand: st/mesa would not, if its own shader does not use
-    * them. */
-   pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 0,
-                           MAX2(st->state.num_sampler_views[MESA_SHADER_COMPUTE], 1),
-                           NULL);
-   st->state.num_sampler_views[MESA_SHADER_COMPUTE] = 0;
-   pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 2, NULL, 0);
-   pipe->set_constant_buffer(pipe, MESA_SHADER_COMPUTE, 0, NULL);
-   ST_SET_STATE3(st->ctx->NewDriverState, ST_NEW_CS_CONSTANTS,
-                 ST_NEW_CS_SSBOS, ST_NEW_CS_SAMPLER_VIEWS);
+      /* A copy into one target only still has both bound. */
+      struct pipe_resource *front_buffer = has_front ? state.front : state.back;
+      struct pipe_resource *back_buffer = has_back ? state.back : state.front;
+      struct pipe_shader_buffer buffers[2] = {
+         { .buffer = front_buffer, .buffer_size = front_buffer->width0 },
+         { .buffer = back_buffer, .buffer_size = back_buffer->width0 },
+      };
+      pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 2, buffers, 0x3);
+
+      for (unsigned i = 0; i < copy_count; i++)
+         dispatch(pipe, &copies[i]);
+
+      pipe->sampler_view_release(pipe, view);
+      cso_restore_compute_state(cso);
+      /* Unbound by hand: st/mesa would not, if its own shader does not use
+       * them. */
+      pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 0,
+                              MAX2(st->state.num_sampler_views[MESA_SHADER_COMPUTE], 1),
+                              NULL);
+      st->state.num_sampler_views[MESA_SHADER_COMPUTE] = 0;
+      pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 2, NULL, 0);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_COMPUTE,
+                                PARAMS_CONSTANT_BUFFER, NULL);
+      ST_SET_STATE4(st->ctx->NewDriverState, ST_NEW_CS_UBOS,
+                    ST_NEW_CS_SSBOS, ST_NEW_CS_SAMPLER_VIEWS,
+                    ST_NEW_CS_SAMPLERS);
+   }
 
    /* The compute jobs were submitted as they were dispatched. */
    entry->token = v3d_haiku_last_job_token(pipe);
+   entry->submitted = system_time();
+   trace_add(&trace.dispatch, entry->submitted - dispatched);
    entry->completed = p->completed;
    entry->cookie = p->cookie;
    state.queue_count++;

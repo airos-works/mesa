@@ -71,6 +71,13 @@ struct pipe_resource *v3d_haiku_import_buffer(struct pipe_screen *screen,
 int v3d_haiku_prepare_ranges(struct pipe_resource *buffer,
                              const struct v3d_haiku_byte_range *ranges,
                              unsigned count, bool no_wait);
+/* A B8G8R8A8 linear render target of width x height pixels, stride bytes a
+ * row, at offset in an imported buffer: the V3D stores whole rows of 16
+ * pixels and groups of 4 rows, so width and height should be multiples of
+ * those for nothing around it to be written. NULL on bad arguments. */
+struct pipe_resource *v3d_haiku_linear_view(struct pipe_resource *buffer,
+                                            uint64_t offset, unsigned width,
+                                            unsigned height, unsigned stride);
 /* A token for the last job the context submitted, and waiting for one
  * (relative timeout, negative: for good; 0 once it is done). */
 int v3d_haiku_last_job_token(struct pipe_context *context);

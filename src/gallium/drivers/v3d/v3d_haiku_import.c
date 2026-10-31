@@ -158,3 +158,44 @@ v3d_haiku_wait_job_token(struct pipe_screen *pscreen, int token,
 }
 
 #endif /* __HAIKU__ */
+
+#ifdef __HAIKU__
+struct pipe_resource *
+v3d_haiku_linear_view(struct pipe_resource *buffer, uint64_t offset,
+                      unsigned width, unsigned height, unsigned stride)
+{
+        if (!buffer || !is_v3d(buffer->screen) || !width || !height ||
+            stride < width * 4 ||
+            offset + (uint64_t)stride * height > buffer->width0)
+                return NULL;
+        struct v3d_resource *source = v3d_resource(buffer);
+        struct v3d_resource *rsc = CALLOC_STRUCT(v3d_resource);
+        if (!rsc)
+                return NULL;
+
+        struct pipe_resource *prsc = &rsc->base;
+        pipe_reference_init(&prsc->reference, 1);
+        prsc->screen = buffer->screen;
+        prsc->target = PIPE_TEXTURE_2D;
+        prsc->format = PIPE_FORMAT_B8G8R8A8_UNORM;
+        prsc->width0 = width;
+        prsc->height0 = height;
+        prsc->depth0 = prsc->array_size = 1;
+        prsc->bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR;
+        prsc->usage = PIPE_USAGE_DEFAULT;
+        rsc->cpp = 4;
+        rsc->tiled = false;
+        rsc->internal_format = prsc->format;
+        rsc->slices[0].offset = offset;
+        rsc->slices[0].stride = stride;
+        rsc->slices[0].padded_height = height;
+        rsc->slices[0].size = stride * height;
+        rsc->slices[0].tiling = V3D_TILING_RASTER;
+        rsc->size = offset + (uint64_t)stride * height;
+        /* contents undefined: nothing is loaded before it is drawn */
+        rsc->initialized_buffers = 0;
+        rsc->bo = v3d_bo_reference(source->bo);
+        rsc->serial_id++;
+        return prsc;
+}
+#endif

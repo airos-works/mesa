@@ -3,8 +3,8 @@
  *
  * Memory of this team as V3D buffers (air/OS haiku#49): the frame buffer
  * cloned from the display driver, app_server's copy of the screen. The
- * render device clones the pages' area into the kernel and holds them until
- * the buffer and its jobs are gone (V3D_HAIKU_IMPORT_BO); the buffers are
+ * render device wires them in this team until the buffer and its jobs are
+ * gone (V3D_HAIKU_IMPORT_BO), so they must stay mapped; the buffers are
  * for shader storage only, never mapped through the driver (the caller has
  * the memory mapped already).
  */

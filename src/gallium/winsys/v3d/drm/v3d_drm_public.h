@@ -58,8 +58,9 @@ struct v3d_haiku_byte_range {
 /* Whether the device imports memory (V3D_HAIKU_PARAM_IMPORT_BO). */
 bool v3d_haiku_can_import(struct pipe_screen *screen);
 /* A buffer (PIPE_BUFFER, for shader storage) of the page-aligned memory at
- * address in this team, which the driver then holds until the resource and
- * the jobs using it are gone. *cached says whether the CPU caches it: then
+ * address in this team, which the driver keeps wired until the resource and
+ * the jobs using it are gone: the memory must stay mapped until then
+ * (deleting its area waits for that). *cached says whether the CPU caches it: then
  * v3d_haiku_prepare_ranges() before a job writes it and before the CPU reads
  * what one wrote. NULL where the device cannot. */
 struct pipe_resource *v3d_haiku_import_buffer(struct pipe_screen *screen,

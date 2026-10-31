@@ -98,8 +98,11 @@ static struct {
    struct pipe_context *shader_pipe;
    void *shader;
 
-   /* rpi_display's frame buffer. */
+   /* rpi_display's frame buffer, and this team's clone of it: the driver
+    * holds the clone's pages wired while the import lives, and deleting a
+    * wired area waits until they are let go of. */
    int display;
+   area_id front_clone;
    struct pipe_resource *front;
    uint32_t front_width, front_height, front_bytes_per_row, front_generation;
    int64_t front_refused_at;
@@ -119,6 +122,7 @@ static struct {
    .lock = PTHREAD_MUTEX_INITIALIZER,
    .changed = PTHREAD_COND_INITIALIZER,
    .display = -1,
+   .front_clone = -1,
 };
 
 
@@ -170,6 +174,9 @@ drop_front(void)
 {
    wait_idle_locked();
    pipe_resource_reference(&state.front, NULL);
+   if (state.front_clone >= 0)
+      delete_area(state.front_clone);
+   state.front_clone = -1;
    state.front_bytes_per_row = 0;
 }
 
@@ -226,12 +233,12 @@ acquire_front(uint32_t bytes_per_row)
                                             align64(size, B_PAGE_SIZE),
                                             &cached);
    }
-   /* The driver holds the pages now; this team needs no mapping of them. */
-   delete_area(clone.area);
    if (state.front == NULL) {
+      delete_area(clone.area);
       state.front_refused_at = now;
       return false;
    }
+   state.front_clone = clone.area;
    state.front_width = info.width;
    state.front_height = info.height;
    state.front_bytes_per_row = info.bytes_per_row;

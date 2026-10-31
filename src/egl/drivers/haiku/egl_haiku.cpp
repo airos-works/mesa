@@ -951,3 +951,239 @@ extern "C" const _EGLDriver _eglDriver = {
    .QuerySurface = haiku_query_surface,
    .SwapBuffers = haiku_swap_buffers,
 };
+
+
+#ifdef GALLIUM_V3D
+#include "main/glthread.h"
+#include "util/format/u_format.h"
+#include "main/mtypes.h"
+
+/* Shared readback targets: Summit's web process composites each page into a
+ * framebuffer object and hands the frame to its UI process in shared memory,
+ * from which app_server draws it. Read back with glReadPixels, the V3D blits
+ * the frame into a linear buffer and the CPU then copies it into that memory
+ * (12 ms of the 26 a 3830x1810 frame took). A shared target is a linear,
+ * cached V3D buffer the other process can map instead (its area is
+ * cloneable): the V3D blits the changed rectangles into it, and the CPU only
+ * hands the buffer over (waits for the blit and invalidates its cache lines).
+ *
+ * Private to air/OS, found with dlsym() (EGL's dispatch never sees them) and
+ * used with a V3D context current that has GPU readback. Each returns a
+ * negative number where the caller has to read back as before.
+ */
+struct haiku_mesa_shared_target {
+   uint32_t version;          /* in: 1 */
+   int32_t area;              /* out: cloneable, in this team */
+   uint32_t offset;           /* out: of the first pixel in the area */
+   uint32_t bytes_per_row;    /* out */
+   void *bits;                /* out: the first pixel, in this team */
+   void *handle;              /* out: for the calls below */
+};
+
+struct haiku_shared_target {
+   struct pipe_screen *screen;
+   struct pipe_resource *linear;
+   area_id area;
+   unsigned width, height;
+};
+
+static bool
+haiku_shared_targets_enabled(struct pipe_screen *screen)
+{
+   const char *value = std::getenv("HAIKU_V3D_SHARED_TARGETS");
+   return (!value || std::strcmp(value, "0")) &&
+          v3d_haiku_gpu_readback_enabled(screen);
+}
+
+/* A width x height B_RGBA32 (BGRA in memory) target, cleared. */
+extern "C" PUBLIC int
+haiku_mesa_shared_target_create(unsigned width, unsigned height,
+                                struct haiku_mesa_shared_target *target)
+{
+   if (!target || target->version < 1 || !width || !height ||
+       width > 8192 || height > 8192)
+      return -1;
+   struct st_context *st = st_api_get_current();
+   if (!st || !haiku_shared_targets_enabled(st->screen))
+      return -10;
+   struct pipe_context *pipe = st->pipe;
+
+   /* As GPU readback's own targets: the stores of the last row group and
+    * of each row's last pixels stay inside the buffer. */
+   struct pipe_resource tmpl = {};
+   tmpl.target = PIPE_TEXTURE_2D;
+   tmpl.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   tmpl.width0 = align(width, 16);
+   tmpl.height0 = align(height, 4);
+   tmpl.depth0 = tmpl.array_size = 1;
+   tmpl.nr_samples = tmpl.nr_storage_samples = 1;
+   tmpl.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR;
+   tmpl.usage = PIPE_USAGE_STAGING;
+   struct pipe_resource *linear = st->screen->resource_create(st->screen, &tmpl);
+   if (!linear)
+      return -2;
+
+   struct pipe_box box;
+   u_box_2d(0, 0, tmpl.width0, tmpl.height0, &box);
+   struct pipe_transfer *transfer = NULL;
+   uint8_t *pixels = static_cast<uint8_t *>(pipe->texture_map(pipe, linear, 0,
+      PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_DIRECTLY, &box, &transfer));
+   area_id shared = B_BAD_VALUE;
+   void *base = NULL;
+   size_t offset = 0;
+   if (pixels && transfer->stride >= size_t(width) * 4 && transfer->stride <= INT32_MAX) {
+      area_info info;
+      area_id original = area_for(pixels);
+      if (original >= B_OK && get_area_info(original, &info) == B_OK) {
+         offset = pixels - static_cast<uint8_t *>(info.address);
+         size_t bytes = size_t(transfer->stride) * height;
+         if (offset <= info.size && bytes <= info.size - offset) {
+            shared = clone_area("Haiku EGL shared target", &base, B_ANY_ADDRESS,
+               B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA, original);
+            if (shared >= B_OK)
+               memset(pixels, 0, size_t(transfer->stride) * tmpl.height0);
+         }
+      }
+   }
+   uint32_t stride = transfer ? transfer->stride : 0;
+   if (pixels)
+      pipe->texture_unmap(pipe, transfer);
+   struct haiku_shared_target *handle = shared >= B_OK
+      ? new(std::nothrow) haiku_shared_target{st->screen, linear, shared, width, height} : NULL;
+   if (!handle) {
+      if (shared >= B_OK)
+         delete_area(shared);
+      pipe_resource_reference(&linear, NULL);
+      return -3;
+   }
+   target->area = shared;
+   target->offset = offset;
+   target->bytes_per_row = stride;
+   target->bits = static_cast<uint8_t *>(base) + offset;
+   target->handle = handle;
+   return 0;
+}
+
+/* Copies `count` rectangles (x, y, width, height; rows counted as GL counts
+ * them in the framebuffer object, which are the target's rows) of the colour
+ * attachment of framebuffer object `framebuffer`, which must be bound for
+ * reading, into the target, and returns once the CPU may read them there. */
+extern "C" PUBLIC int
+haiku_mesa_shared_target_copy(void *handle, unsigned framebuffer,
+                              const int32_t *rects, unsigned count)
+{
+   struct haiku_shared_target *target = static_cast<haiku_shared_target *>(handle);
+   struct st_context *st = st_api_get_current();
+   if (!target || !st || st->screen != target->screen || !framebuffer)
+      return -10;
+   struct gl_context *ctx = st->ctx;
+   if (ctx->GLThread.enabled)
+      _mesa_glthread_finish(ctx);
+   struct gl_framebuffer *fb = ctx->ReadBuffer;
+   if (!fb || fb->Name != framebuffer)
+      return -11;
+   struct gl_renderbuffer *rb = fb->Attachment[BUFFER_COLOR0].Renderbuffer;
+   if (!rb || !rb->texture || rb->texture->nr_samples > 1)
+      return -11;
+   struct pipe_context *pipe = st->pipe;
+   const int fbWidth = MIN2(int(rb->Width), int(target->width));
+   const int fbHeight = MIN2(int(rb->Height), int(target->height));
+   uint64_t pixels = 0;
+   for (unsigned i = 0; i < count; i++) {
+      int x = MAX2(rects[4 * i], 0), y = MAX2(rects[4 * i + 1], 0);
+      int right = MIN2(rects[4 * i] + rects[4 * i + 2], fbWidth);
+      int bottom = MIN2(rects[4 * i + 1] + rects[4 * i + 3], fbHeight);
+      if (right > x && bottom > y)
+         pixels += uint64_t(right - x) * (bottom - y);
+   }
+   if (!pixels)
+      return 0;
+
+   /* A little that changed (a caret, a small animation) is copied by the
+    * CPU: small maps of the framebuffer are read on the CPU anyway, and the
+    * target stays the CPU's from one such frame to the next. Handing it to
+    * the GPU and back costs the cache maintenance of all of it (13.8 against
+    * 2.2 ms a frame at 3820x1814 for a 120x120 animation). */
+   static const bool cpuCopies = [] {
+      const char *value = std::getenv("HAIKU_V3D_SHARED_TARGET_CPU_COPIES");
+      return !value || std::strcmp(value, "0");
+   }();
+   if (cpuCopies && pixels * 16 <= uint64_t(target->width) * target->height &&
+       util_format_get_blocksize(rb->texture->format) == 4 &&
+       !util_format_is_compressed(rb->texture->format)) {
+      struct pipe_box whole;
+      u_box_2d(0, 0, target->width, target->height, &whole);
+      struct pipe_transfer *destination = NULL;
+      uint8_t *bits = static_cast<uint8_t *>(pipe->texture_map(pipe, target->linear, 0,
+         PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_DIRECTLY, &whole, &destination));
+      if (!bits)
+         return -12;
+      int status = 0;
+      for (unsigned i = 0; i < count && !status; i++) {
+         int x = MAX2(rects[4 * i], 0), y = MAX2(rects[4 * i + 1], 0);
+         int right = MIN2(rects[4 * i] + rects[4 * i + 2], fbWidth);
+         int bottom = MIN2(rects[4 * i + 1] + rects[4 * i + 3], fbHeight);
+         if (right <= x || bottom <= y)
+            continue;
+         struct pipe_box box;
+         u_box_3d(x, y, rb->surface.first_layer, right - x, bottom - y, 1, &box);
+         struct pipe_transfer *source = NULL;
+         const uint8_t *from = static_cast<const uint8_t *>(pipe->texture_map(pipe, rb->texture,
+            rb->surface.level, PIPE_MAP_READ, &box, &source));
+         if (!from || !util_format_translate(target->linear->format, bits, destination->stride, x, y,
+               rb->texture->format, from, source->stride, 0, 0, right - x, bottom - y))
+            status = -13;
+         if (from)
+            pipe->texture_unmap(pipe, source);
+      }
+      pipe->texture_unmap(pipe, destination);
+      return status;
+   }
+
+   int x0 = INT32_MAX, y0 = INT32_MAX, x1 = 0, y1 = 0;
+   for (unsigned i = 0; i < count; i++) {
+      int x = MAX2(rects[4 * i], 0), y = MAX2(rects[4 * i + 1], 0);
+      int right = MIN2(rects[4 * i] + rects[4 * i + 2], fbWidth);
+      int bottom = MIN2(rects[4 * i + 1] + rects[4 * i + 3], fbHeight);
+      if (right <= x || bottom <= y)
+         continue;
+      struct pipe_blit_info blit = {};
+      blit.src.resource = rb->texture;
+      blit.src.level = rb->surface.level;
+      blit.src.format = rb->texture->format;
+      u_box_3d(x, y, rb->surface.first_layer, right - x, bottom - y, 1, &blit.src.box);
+      blit.dst.resource = target->linear;
+      blit.dst.format = target->linear->format;
+      u_box_2d(x, y, right - x, bottom - y, &blit.dst.box);
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      pipe->blit(pipe, &blit);
+      x0 = MIN2(x0, x); y0 = MIN2(y0, y);
+      x1 = MAX2(x1, right); y1 = MAX2(y1, bottom);
+   }
+   if (x1 <= x0 || y1 <= y0)
+      return 0;
+   /* A read-only map waits for the blits and hands the buffer to the CPU
+    * (its cache lines invalidated); nothing is copied. */
+   struct pipe_box box;
+   u_box_2d(x0, y0, x1 - x0, y1 - y0, &box);
+   struct pipe_transfer *transfer = NULL;
+   void *mapped = pipe->texture_map(pipe, target->linear, 0, PIPE_MAP_READ, &box, &transfer);
+   if (!mapped)
+      return -12;
+   pipe->texture_unmap(pipe, transfer);
+   return 0;
+}
+
+extern "C" PUBLIC void
+haiku_mesa_shared_target_destroy(void *handle)
+{
+   struct haiku_shared_target *target = static_cast<haiku_shared_target *>(handle);
+   if (!target)
+      return;
+   /* Other teams' clones keep the pages until they let go of them. */
+   delete_area(target->area);
+   pipe_resource_reference(&target->linear, NULL);
+   delete target;
+}
+#endif

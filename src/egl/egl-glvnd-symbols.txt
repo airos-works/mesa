@@ -3,3 +3,6 @@ MesaGLInteropEGLQueryDeviceInfo
 MesaGLInteropEGLExportObject
 MesaGLInteropEGLFlushObjects
 haiku_mesa_readback_band_bytes (optional)
+haiku_mesa_shared_target_create (optional)
+haiku_mesa_shared_target_copy (optional)
+haiku_mesa_shared_target_destroy (optional)

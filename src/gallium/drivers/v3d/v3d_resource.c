@@ -33,6 +33,7 @@
 #include "util/u_upload_mgr.h"
 #include "util/format/u_format_zs.h"
 #include "util/u_drm.h"
+#include "util/u_debug.h"
 
 #include "drm-uapi/drm_fourcc.h"
 #include "v3d_screen.h"
@@ -112,11 +113,19 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
          */
         uint32_t padding =
                 rsc->base.target == PIPE_BUFFER ? 4 : V3D_TFU_READAHEAD_SIZE;
-        bool cacheable = (rsc->tiled ||
-                (v3d_screen(pscreen)->haiku_gpu_readback &&
-                 prsc->target == PIPE_TEXTURE_2D &&
-                 prsc->usage == PIPE_USAGE_STAGING &&
-                 (prsc->bind & PIPE_BIND_LINEAR))) &&
+        /* Linear staging targets the GPU renders into (see
+         * v3d_haiku_linear_staging()) are read by the CPU: cached memory with
+         * the ownership protocol, as GPU readback's own targets. Their height
+         * is not rounded up as those are; three rows to spare keep a store of
+         * the last row group inside the buffer either way.
+         */
+        bool linear_staging = v3d_screen(pscreen)->haiku_gpu_readback &&
+                prsc->target == PIPE_TEXTURE_2D &&
+                prsc->usage == PIPE_USAGE_STAGING && !rsc->tiled &&
+                (prsc->bind & (PIPE_BIND_LINEAR | PIPE_BIND_RENDER_TARGET));
+        if (linear_staging && !(prsc->bind & PIPE_BIND_LINEAR))
+                padding += 3 * rsc->slices[0].stride;
+        bool cacheable = (rsc->tiled || linear_staging) &&
                 v3d_screen(pscreen)->has_cacheable_textures &&
                 !(prsc->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
                                   PIPE_RESOURCE_FLAG_MAP_COHERENT));
@@ -132,6 +141,34 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
                 return false;
         }
 }
+
+#ifdef __HAIKU__
+/* V3D_HAIKU_LINEAR_STAGING=0 keeps them tiled. */
+DEBUG_GET_ONCE_BOOL_OPTION(v3d_haiku_linear_staging, "V3D_HAIKU_LINEAR_STAGING", true)
+
+/* glReadPixels with a conversion a blit can do (an RGBA framebuffer read as
+ * BGRA, as Summit's compositor reads every frame) blits into a staging
+ * texture of the read's size first and maps that (st_ReadPixels). Tiled, the
+ * map blitted it once more into linear memory for GPU readback, and the CPU
+ * waited for both jobs; linear and cached, the first blit's pixels are read
+ * where it stored them. On the Pi at 3830x1810 that read went from 39 to
+ * 28 ms, what reading RGBA without a conversion costs.
+ */
+static bool
+v3d_haiku_linear_staging(const struct v3d_screen *screen,
+                         const struct pipe_resource *tmpl)
+{
+        return screen->haiku_gpu_readback &&
+               tmpl->usage == PIPE_USAGE_STAGING &&
+               tmpl->target == PIPE_TEXTURE_2D && tmpl->last_level == 0 &&
+               tmpl->array_size == 1 && tmpl->depth0 == 1 &&
+               tmpl->nr_samples <= 1 &&
+               (tmpl->bind & ~PIPE_BIND_LINEAR) == PIPE_BIND_RENDER_TARGET &&
+               util_format_get_blocksize(tmpl->format) == 4 &&
+               !util_format_is_depth_or_stencil(tmpl->format) &&
+               debug_get_option_v3d_haiku_linear_staging();
+}
+#endif
 
 static void
 v3d_resource_transfer_unmap(struct pipe_context *pctx,
@@ -897,6 +934,11 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
          */
         if (tmpl->bind & PIPE_BIND_SCANOUT)
                 should_tile = false;
+
+#ifdef __HAIKU__
+        if (v3d_haiku_linear_staging(screen, tmpl))
+                should_tile = false;
+#endif
 
         /* No user-specified modifier; determine our own. */
         if (count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID) {

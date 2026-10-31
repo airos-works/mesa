@@ -11,6 +11,7 @@ files_libv3d = files(
   'v3d_context.h',
   'v3d_disk_cache.c',
   'v3d_fence.c',
+  'v3d_haiku_import.c',
   'v3d_formats.c',
   'v3d_job.c',
   'v3d_program.c',

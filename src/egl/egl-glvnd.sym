@@ -4,6 +4,10 @@
 		haiku_mesa_shared_target_create;
 		haiku_mesa_shared_target_copy;
 		haiku_mesa_shared_target_destroy;
+		summit_haiku_present_framebuffer;
+		summit_haiku_present_wait_idle;
+		summit_haiku_present_release;
+		summit_haiku_present_version;
 		__egl_Main;
 		MesaGLInteropEGLQueryDeviceInfo;
 		MesaGLInteropEGLExportObject;

@@ -38,6 +38,43 @@ struct pipe_screen *v3d_drm_screen_create_renderonly(int fd, struct renderonly *
 struct pipe_screen *v3d_haiku_screen_create(const char *device);
 /* False for any other Gallium driver or when the ownership API is absent. */
 int v3d_haiku_gpu_readback_enabled(struct pipe_screen *screen);
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+struct pipe_context;
+struct pipe_resource;
+
+/* Bytes of a buffer: rows rows of bytes bytes, stride apart (0 rows: 1). */
+struct v3d_haiku_byte_range {
+   uint64_t offset;
+   uint32_t bytes;
+   uint32_t rows;
+   uint32_t stride;
+   uint32_t pad;
+};
+
+/* Whether the device imports memory (V3D_HAIKU_PARAM_IMPORT_BO). */
+bool v3d_haiku_can_import(struct pipe_screen *screen);
+/* A buffer (PIPE_BUFFER, for shader storage) of the page-aligned memory at
+ * address in this team, which the driver then holds until the resource and
+ * the jobs using it are gone. *cached says whether the CPU caches it: then
+ * v3d_haiku_prepare_ranges() before a job writes it and before the CPU reads
+ * what one wrote. NULL where the device cannot. */
+struct pipe_resource *v3d_haiku_import_buffer(struct pipe_screen *screen,
+                                              void *address, size_t size,
+                                              bool *cached);
+/* Cache maintenance of an imported cached buffer's ranges; waits for its
+ * jobs first unless no_wait. 0 or a negative error. */
+int v3d_haiku_prepare_ranges(struct pipe_resource *buffer,
+                             const struct v3d_haiku_byte_range *ranges,
+                             unsigned count, bool no_wait);
+/* A token for the last job the context submitted, and waiting for one
+ * (relative timeout, negative: for good; 0 once it is done). */
+int v3d_haiku_last_job_token(struct pipe_context *context);
+int v3d_haiku_wait_job_token(struct pipe_screen *screen, int token,
+                             int64_t timeout_ns);
 #endif
 
 #endif /* __V3D_DRM_PUBLIC_H__ */

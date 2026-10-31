@@ -61,6 +61,7 @@
 extern "C" {
 #include "v3d/drm/v3d_drm_public.h"
 }
+#include "egl_haiku_v3d_present.h"
 #endif
 
 #include <Bitmap.h>
@@ -604,6 +605,9 @@ haiku_display_destroy(_EGLDisplay *disp)
 
    _eglCleanupDisplay(disp);
    struct pipe_screen *screen = hgl_dpy->disp->fscreen->screen;
+#ifdef GALLIUM_V3D
+   haiku_v3d_present_release(screen);
+#endif
    hgl_destroy_display(hgl_dpy->disp);
    hgl_dpy->disp = NULL;
    screen->destroy(screen); // destroy will deallocate object
@@ -1185,5 +1189,57 @@ haiku_mesa_shared_target_destroy(void *handle)
    delete_area(target->area);
    pipe_resource_reference(&target->linear, NULL);
    delete target;
+}
+
+/* Summit's direct present (Summit's Mesa patch 06, as Zink has it): with a
+ * direct window on the screen, the web process has each composited frame
+ * copied by the GPU into the frame buffer and app_server's copy of the
+ * screen instead of reading it back; see egl_haiku_v3d_present.c. Found with
+ * dlsym(). The framebuffer object must be bound for drawing. 0 when the
+ * copies were submitted, a negative number when the caller has to present
+ * some other way (-10: no current V3D context or a kernel without imports,
+ * -11: that framebuffer object is not bound or has no colour renderbuffer).
+ * HAIKU_V3D_DIRECT_PRESENT=0 refuses. */
+extern "C" PUBLIC int
+summit_haiku_present_framebuffer(unsigned framebuffer,
+                                 const struct summit_haiku_present *present)
+{
+   static const bool enabled = [] {
+      const char *value = std::getenv("HAIKU_V3D_DIRECT_PRESENT");
+      return !value || std::strcmp(value, "0");
+   }();
+   struct st_context *st = st_api_get_current();
+   if (!enabled || !st || !v3d_haiku_can_import(st->screen))
+      return -10;
+   struct gl_context *ctx = st->ctx;
+   if (ctx->GLThread.enabled)
+      _mesa_glthread_finish(ctx);
+   struct gl_framebuffer *fb = ctx->DrawBuffer;
+   if (!fb || !framebuffer || fb->Name != framebuffer)
+      return -11;
+   struct gl_renderbuffer *rb = fb->Attachment[BUFFER_COLOR0].Renderbuffer;
+   if (!rb || !rb->texture)
+      return -11;
+   return haiku_v3d_present(st, rb->texture, present);
+}
+
+extern "C" PUBLIC void
+summit_haiku_present_wait_idle(void)
+{
+   haiku_v3d_present_wait_idle();
+}
+
+extern "C" PUBLIC void
+summit_haiku_present_release(void)
+{
+   haiku_v3d_present_release(NULL);
+}
+
+/* The highest struct summit_haiku_present version taken: no deferred
+ * presents on the V3D. */
+extern "C" PUBLIC int
+summit_haiku_present_version(void)
+{
+   return 1;
 }
 #endif

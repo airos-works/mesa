@@ -90,6 +90,8 @@ struct v3d_screen {
         bool has_multisync;
         bool has_cacheable_textures;
         bool haiku_gpu_readback;
+        /* V3D_HAIKU_PARAM_IMPORT_BO: memory of this team as buffers */
+        bool haiku_can_import;
 
 #if USE_V3D_SIMULATOR
         struct v3d_simulator_file *sim_file;

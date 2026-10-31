@@ -855,6 +855,12 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
                 cacheable.value >= 2;
         screen->haiku_gpu_readback = screen->has_cacheable_textures &&
                 debug_get_bool_option("V3D_HAIKU_GPU_READBACK", true);
+        struct drm_v3d_get_param import = {
+                .param = HAIKU_V3D_PARAM_IMPORT_BO,
+        };
+        screen->haiku_can_import = screen->has_csd &&
+                v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &import) == 0 &&
+                import.value >= 1;
 #endif
 
         v3d_fence_screen_init(screen);

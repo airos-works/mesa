@@ -738,6 +738,12 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->texture_half_float_linear = true;
    caps->shader_array_components = true;
    caps->texture_buffer_objects = true;
+   /* For glthread: buffers stay mapped while the GPU runs, and an
+    * unsynchronized PIPE_MAP_THREAD_SAFE map touches no context state (a
+    * transfer outside the context, one mmap per BO, a locked min/max
+    * index cache; see panfrost_ptr_map). */
+   caps->map_unsynchronized_thread_safe = true;
+   caps->allow_mapped_buffers_during_execution = true;
    caps->packed_uniforms = true;
    caps->image_load_formatted = true;
    caps->cube_map_array = true;

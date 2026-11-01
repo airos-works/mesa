@@ -1585,7 +1585,9 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
        rsrc->modifier != DRM_FORMAT_MOD_LINEAR)
       return NULL;
 
-   struct panfrost_transfer *transfer = rzalloc(pctx, struct panfrost_transfer);
+   /* Not a child of the context: with map_unsynchronized_thread_safe,
+    * glthread maps from another thread, and ralloc is not thread safe. */
+   struct panfrost_transfer *transfer = rzalloc(NULL, struct panfrost_transfer);
    transfer->base.level = level;
    transfer->base.usage = usage;
    transfer->base.box = *box;
@@ -1663,7 +1665,12 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
       usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
    }
 
-   bool create_new_bo = usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+   /* A thread-safe unsynchronized map (glthread, from the application
+    * thread) must not touch the context: it never replaces the BO, the
+    * caller vouches that nothing in flight conflicts with its writes. */
+   bool create_new_bo = (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+                        !((usage & PIPE_MAP_UNSYNCHRONIZED) &&
+                          (usage & PIPE_MAP_THREAD_SAFE));
    bool copy_resource = false;
 
    if (!(usage & PIPE_MAP_UNSYNCHRONIZED) &&

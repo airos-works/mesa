@@ -167,12 +167,23 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
 #ifdef ENABLE_SHADER_CACHE
    const char *renderer = screen->base.get_name(&screen->base);
 
+#ifdef __HAIKU__
+   /* Haiku has dladdr(), but not dl_iterate_phdr(): Mesa's timestamp
+    * fallback rather than a mapped ELF build ID (as for V3D). */
+   struct mesa_sha1 ctx;
+   uint8_t id_sha1[20];
+   _mesa_sha1_init(&ctx);
+   if (!disk_cache_get_function_identifier(panfrost_disk_cache_init, &ctx))
+      return;
+   _mesa_sha1_final(&ctx, id_sha1);
+#else
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(panfrost_disk_cache_init);
    assert(note && build_id_length(note) == 20); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
+#endif
 
    char timestamp[41];
    _mesa_sha1_format(timestamp, id_sha1);

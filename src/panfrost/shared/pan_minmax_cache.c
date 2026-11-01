@@ -40,6 +40,11 @@
 
 #include "pan_minmax_cache.h"
 #include "util/macros.h"
+#include "util/simple_mtx.h"
+
+/* Gallium's glthread maps buffers (and so invalidates their entries) from
+ * the application thread while the driver thread reads and adds them. */
+static simple_mtx_t pan_minmax_lock = SIMPLE_MTX_INITIALIZER;
 
 /*
  * note: a count of 0 would be an empty range, which we don't have to
@@ -93,7 +98,7 @@ pan_minmax_cache_get(struct pan_minmax_cache *cache, unsigned index_size,
    if (!ht_key)
       return false;
 
-
+   simple_mtx_lock(&pan_minmax_lock);
    for (unsigned i = 0; i < cache->size; ++i) {
       if (cache->keys[i] == ht_key) {
          uint64_t hit = cache->values[i];
@@ -104,6 +109,7 @@ pan_minmax_cache_get(struct pan_minmax_cache *cache, unsigned index_size,
          break;
       }
    }
+   simple_mtx_unlock(&pan_minmax_lock);
 
    return found;
 }
@@ -120,6 +126,7 @@ pan_minmax_cache_add(struct pan_minmax_cache *cache, unsigned index_size,
    if (!ht_key)
       return;
 
+   simple_mtx_lock(&pan_minmax_lock);
    if (cache->size == PANFROST_MINMAX_SIZE) {
       index = cache->index++;
       cache->index = cache->index % PANFROST_MINMAX_SIZE;
@@ -129,6 +136,7 @@ pan_minmax_cache_add(struct pan_minmax_cache *cache, unsigned index_size,
 
    cache->keys[index] = ht_key;
    cache->values[index] = value;
+   simple_mtx_unlock(&pan_minmax_lock);
 }
 
 /* If we've been caching min/max indices and we update the index
@@ -150,6 +158,7 @@ pan_minmax_cache_invalidate(struct pan_minmax_cache *cache, unsigned index_size,
    size *= index_size;
    unsigned valid_count = 0;
 
+   simple_mtx_lock(&pan_minmax_lock);
    for (unsigned i = 0; i < cache->size; ++i) {
       uint64_t key = cache->keys[i];
 
@@ -173,4 +182,5 @@ pan_minmax_cache_invalidate(struct pan_minmax_cache *cache, unsigned index_size,
 
    cache->size = valid_count;
    cache->index = 0;
+   simple_mtx_unlock(&pan_minmax_lock);
 }

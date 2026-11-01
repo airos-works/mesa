@@ -33,6 +33,8 @@
 #include "pan_device.h"
 #include "pan_util.h"
 #include "wrap.h"
+#include "util/simple_mtx.h"
+#include "util/u_atomic.h"
 
 #include "util/os_mman.h"
 
@@ -342,17 +344,24 @@ panfrost_bo_mmap(struct panfrost_bo *bo)
 {
    MESA_TRACE_FUNC();
 
-   if (bo->ptr.cpu)
+   if (p_atomic_read(&bo->ptr.cpu))
       return 0;
 
-   bo->ptr.cpu = pan_kmod_bo_mmap(bo->kmod_bo, 0, panfrost_bo_size(bo),
-                                  PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
-   if (bo->ptr.cpu == MAP_FAILED) {
-      bo->ptr.cpu = NULL;
-      return -1;
+   /* glthread maps buffers from the application thread while the driver
+    * thread may map the same BO: one mapping, made once. */
+   static simple_mtx_t mmap_lock = SIMPLE_MTX_INITIALIZER;
+   simple_mtx_lock(&mmap_lock);
+   int ret = 0;
+   if (!bo->ptr.cpu) {
+      void *cpu = pan_kmod_bo_mmap(bo->kmod_bo, 0, panfrost_bo_size(bo),
+                                   PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+      if (cpu == MAP_FAILED)
+         ret = -1;
+      else
+         p_atomic_set(&bo->ptr.cpu, cpu);
    }
-
-   return 0;
+   simple_mtx_unlock(&mmap_lock);
+   return ret;
 }
 
 static void

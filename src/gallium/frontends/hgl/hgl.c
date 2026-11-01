@@ -221,6 +221,16 @@ hgl_st_framebuffer_validate(struct st_context *st,
 }
 
 
+/* (air/OS) glthread's thread starts by announcing itself to the frontend
+ * (st_set_background_context): the DRI one tells its loader and the HUD;
+ * this one has neither. Without the hook, the call jumps to NULL. */
+static void
+hgl_st_set_background_context(struct st_context *st,
+	struct util_queue_monitoring *queue_info)
+{
+}
+
+
 static int
 hgl_st_manager_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
 {
@@ -417,6 +427,7 @@ hgl_create_display(struct pipe_screen* screen)
 	}
 	display->fscreen->screen = screen;
 	display->fscreen->get_param = hgl_st_manager_get_param;
+	display->fscreen->set_background_context = hgl_st_set_background_context;
 	// display->fscreen->st_screen is used by llvmpipe
 
 	return display;

@@ -44,6 +44,7 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
+#include "main/glthread.h"
 #include "state_tracker/st_context.h"
 #include "util/box.h"
 #include "util/u_atomic.h"
@@ -671,6 +672,25 @@ haiku_create_context(_EGLDisplay *disp, _EGLConfig *conf,
       goto cleanup;
    }
 
+   /* (air/OS) glthread, as the DRI front end has it (dri_create_context):
+    * the context's GL calls are queued and executed on a thread of their
+    * own, which the GL front end's work (validation, state tracking) then
+    * costs instead of the caller's; the driver must be able to map buffers
+    * from any thread (Zink can). Off unless asked for: mesa_glthread=true
+    * for every context, mesa_glthread=main only for contexts made on the
+    * team's main thread (a web process's WebGL contexts; with every context
+    * Summit's compositor misses its wake-ups and draws at 10 fps).
+    * Everything here that touches the pipe context directly (make current,
+    * swap) finishes the queue first. */
+   {
+      const char *glthread = os_get_option("mesa_glthread");
+      bool use_glthread = glthread != NULL && strcmp(glthread, "main") == 0
+         ? find_thread(NULL) == getpid()
+         : debug_get_bool_option("mesa_glthread", false);
+      if (use_glthread)
+         _mesa_glthread_init(context->ctx->st->ctx);
+   }
+
    return &context->base;
 
 cleanup:
@@ -713,10 +733,15 @@ haiku_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
    }
 
    _EGLDisplay *old_disp = old_ctx ? old_ctx->Resource.Display : NULL;
-   if (old_ctx && old_ctx->ReleaseBehavior == EGL_CONTEXT_RELEASE_BEHAVIOR_FLUSH_KHR) {
+   if (old_ctx) {
+      /* (air/OS) What glthread still has queued for the old context runs
+       * first, as dri_unbind_context() has it: the context may be made
+       * current on another thread next, and its queue must not run there
+       * and here at once. */
       struct st_context *st = haiku_egl_context(old_ctx)->ctx->st;
       _mesa_glthread_finish(st->ctx);
-      st_context_flush(st, 0, NULL, NULL, NULL);
+      if (old_ctx->ReleaseBehavior == EGL_CONTEXT_RELEASE_BEHAVIOR_FLUSH_KHR)
+         st_context_flush(st, 0, NULL, NULL, NULL);
    }
 
    if (hgl_dsurf)

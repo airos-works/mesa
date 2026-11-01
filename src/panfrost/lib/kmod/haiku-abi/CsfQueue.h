@@ -17,7 +17,10 @@ static const uint32_t kGetQueueInfo = 0x4d435344;
 static const uint32_t kSubmitQueueSync = 0x4d435345;
 static const uint32_t kGetQueueResetInfo = 0x4d435347;
 static const uint32_t kClientQueues = 4;
-static const uint32_t kMaxRuntimeQueues = 8;
+// Software queues: one per GL/Vulkan context in the whole system. The runtime
+// switches them through one hardware group, so the bound is the firmware
+// window their interface and suspend memory must fit (CsfQueueMemory.h).
+static const uint32_t kMaxRuntimeQueues = 24;
 static const uint32_t kMaxQueueJobs = 64;
 static const uint32_t kMaxStreamBytes = 1024 * 1024;
 static const uint32_t kQueueReady = 1;

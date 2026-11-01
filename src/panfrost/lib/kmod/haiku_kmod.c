@@ -16,9 +16,6 @@
 #include "haiku_csf_sync.h"
 #include "haiku_kmod.h"
 
-#define HAIKU_MAX_MAPPINGS 256
-#define HAIKU_MAX_GROUPS 8
-#define HAIKU_MAX_HEAPS 128
 
 struct haiku_range { uint64_t start, size; };
 struct haiku_vm {
@@ -26,6 +23,9 @@ struct haiku_vm {
    simple_mtx_t map_lock, sync_lock;
    uint64_t start, limit;
    struct haiku_range mappings[HAIKU_MAX_MAPPINGS];
+   /* The next map under construction, guarded by map_lock: too big for the
+    * stack of the threads that allocate buffers (64 KiB). */
+   struct haiku_range scratch[HAIKU_MAX_MAPPINGS];
    unsigned count;
    uint32_t sync_handle;
    uint64_t sync_point;
@@ -305,7 +305,7 @@ static int haiku_vm_bind(struct pan_kmod_vm *base, enum pan_kmod_vm_op_mode mode
        && mode != PAN_KMOD_VM_OP_MODE_DEFER_TO_NEXT_IDLE_POINT) return fail(ENOTSUP);
    if (!count || count > 64 || !ops) return fail(EINVAL);
    struct haiku_vm *vm = container_of(base, struct haiku_vm, base);
-   struct haiku_range next[HAIKU_MAX_MAPPINGS];
+   struct haiku_range *next = vm->scratch;
    struct pan_haiku_vm_op native[64] = {0};
    uint64_t output_va[64];
    simple_mtx_lock(&vm->map_lock);

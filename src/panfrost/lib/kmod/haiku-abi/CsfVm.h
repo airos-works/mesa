@@ -11,12 +11,12 @@ static const uint32_t kDestroyVm = 0x4d435321;
 static const uint32_t kGetVmInfo = 0x4d435322;
 static const uint32_t kBindVm = 0x4d435323;
 static const uint32_t kClientVmMappings = 2;
-static const uint32_t kMaxClientVms = 16;
-static const uint32_t kMaxVmMappings = 256;
+static const uint32_t kMaxClientVms = 64;
+static const uint32_t kMaxVmMappings = 4096;
 static const uint32_t kMaxVmOperations = 64;
-static const uint32_t kMaxVmTablePages = 1024;
+static const uint32_t kMaxVmTablePages = 8192;
 static const uint64_t kVmUserLimit = UINT64_C(1) << 47;
-static const uint64_t kMaxVmMappedBytes = UINT64_C(1) << 30;
+static const uint64_t kMaxVmMappedBytes = UINT64_C(8) << 30;
 
 // Match the permission meanings used by Panthor. Read access is implicit;
 // read-only executable, read/write non-executable and read-only non-executable

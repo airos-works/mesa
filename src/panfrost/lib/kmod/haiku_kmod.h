@@ -5,6 +5,13 @@
 #include <sys/types.h>
 #include "drm-uapi/panthor_drm.h"
 #include "haiku_csf_native.h"
+
+/* The kernel's limits (haiku-abi): one mapping per buffer a process maps into
+ * its GPU VM (kMaxVmMappings), and its queues (kMaxRuntimeQueues, which bounds
+ * the whole system). haiku_csf_native.cpp checks that they agree. */
+#define HAIKU_MAX_MAPPINGS 4096
+#define HAIKU_MAX_GROUPS 24
+#define HAIKU_MAX_HEAPS 128
 struct pan_kmod_dev;
 struct pan_kmod_vm;
 struct pan_kmod_bo;

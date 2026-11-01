@@ -16,9 +16,11 @@ static const uint32_t kMapBuffer = 0x4d435313;
 static const uint32_t kGetBufferInfo = 0x4d435314;
 static const uint32_t kClientCpuBuffers = 1;
 static const uint32_t kBufferNormalNoncacheable = 1;
-static const uint32_t kMaxClientBuffers = 128;
-static const uint64_t kMaxBufferBytes = UINT64_C(64) << 20;
-static const uint64_t kMaxClientBufferBytes = UINT64_C(256) << 20;
+// Panfrost keeps one BO per texture, buffer and pool slab and caches freed
+// ones, so a WebKit process (compositor plus WebGL) holds thousands of them.
+static const uint32_t kMaxClientBuffers = 4096;
+static const uint64_t kMaxBufferBytes = UINT64_C(512) << 20;
+static const uint64_t kMaxClientBufferBytes = UINT64_C(2) << 30;
 
 struct ClientInfo {
 	uint32_t version;

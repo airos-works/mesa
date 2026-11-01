@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "haiku_csf_native.h"
+#include "haiku_kmod.h"
 #include "CsfQueue.h"
 #include "CsfFirmware.h"
 #include <OS.h>
@@ -9,6 +10,10 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+
+static_assert(HAIKU_MAX_MAPPINGS == MaliCSF::kMaxVmMappings, "VM mapping limit");
+static_assert(HAIKU_MAX_GROUPS <= MaliCSF::kMaxRuntimeQueues, "queue limit");
+static_assert(HAIKU_MAX_HEAPS == MaliCSF::kMaxVmHeaps, "heap limit");
 
 using namespace MaliCSF;
 

@@ -298,9 +298,18 @@ int pan_haiku_queue_submit(int fd, uint32_t queue, uint64_t generation,
    for (uint32_t i = 0; i < signalCount; i++)
       request.points[waitCount + i] = {signals[i].handle, 0, signals[i].point};
    __sync_synchronize();
-   if (NativeIoctl(fd, kSubmitQueueSync, &request,
-      sizeof(QueueSubmitSync) + (waitCount + signalCount) * sizeof(SyncPoint)) != 0)
-      return -1;
+   // The driver holds at most kMaxQueueJobs unfinished jobs a queue and turns
+   // more away with B_BUSY, where Linux's scheduler would queue them. Wait for
+   // the GPU to retire some instead of losing the batch (a burst of small
+   // flushes, such as texture uploads into AFBC, fills the queue).
+   for (bigtime_t delay = 50, waited = 0;; waited += delay, delay = delay < 2000 ? delay * 2 : delay) {
+      if (NativeIoctl(fd, kSubmitQueueSync, &request,
+         sizeof(QueueSubmitSync) + (waitCount + signalCount) * sizeof(SyncPoint)) == 0)
+         break;
+      if (errno != B_BUSY || waited >= 5000000)
+         return -1;
+      snooze(delay);
+   }
    if (TraceEnabled()) {
       int saved = errno;
       fprintf(stderr, "HAIKU_MESA_NATIVE_SUBMIT handle=%u generation=%llu address=%llx bytes=%u waits=%u signals=%u sequence=%llu\n",

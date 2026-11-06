@@ -37,6 +37,7 @@
 
 #include "frontend/winsys_handle.h"
 #include "util/format/u_format.h"
+#include "util/detect_os.h"
 #include "util/u_debug_image.h"
 #include "util/u_drm.h"
 #include "util/u_gen_mipmap.h"
@@ -1597,6 +1598,26 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
    if (usage & PIPE_MAP_WRITE)
       rsrc->constant_stencil = false;
+
+#if DETECT_OS_HAIKU
+   /* A texture the CPU keeps writing into, such as a compositor's tile
+    * texture updated with glTexSubImage2D, pays for a staging resource, a
+    * blit and a flush at every write while it is AFBC: thousands of tiny
+    * batches a second. After a few writes, move it to u-interleaved tiling,
+    * which the CPU writes directly. */
+   if ((usage & PIPE_MAP_WRITE) && drm_is_afbc(rsrc->modifier) &&
+       !rsrc->modifier_constant && panfrost_is_2d(rsrc) &&
+       rsrc->base.last_level == 0 && rsrc->base.array_size == 1 &&
+       !(rsrc->base.bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT |
+                            PIPE_BIND_DISPLAY_TARGET)) &&
+       panfrost_should_tile(dev, rsrc, rsrc->base.format) &&
+       ++rsrc->cpu_afbc_writes >= PAN_HAIKU_CPU_AFBC_WRITES) {
+      pan_resource_modifier_convert(
+         ctx, rsrc, DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
+         BITSET_TEST(rsrc->valid.data, level), "CPU writes into AFBC");
+      bo = rsrc->bo;
+   }
+#endif
 
    /* We don't have s/w routines for AFBC/AFRC, so use a staging texture */
    if (drm_is_afbc(rsrc->modifier) ||

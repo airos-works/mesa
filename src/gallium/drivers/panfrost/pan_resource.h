@@ -31,6 +31,7 @@
 #include "pan_screen.h"
 
 #define LAYOUT_CONVERT_THRESHOLD 8
+#define PAN_HAIKU_CPU_AFBC_WRITES 4
 #define PAN_MAX_BATCHES          32
 
 #define PAN_BIND_SHARED_MASK                                                   \
@@ -108,6 +109,9 @@ struct panfrost_resource {
 
    /* Used to decide when to convert to another modifier */
    uint16_t modifier_updates;
+
+   /* CPU writes into this resource while it was AFBC (Haiku) */
+   uint16_t cpu_afbc_writes;
 
    /* Do all pixels have the same stencil value? */
    bool constant_stencil;

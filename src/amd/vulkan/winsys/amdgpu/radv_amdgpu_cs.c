@@ -1263,6 +1263,49 @@ fail:
    return result;
 }
 
+#ifdef __HAIKU__
+/* amdgpu_drm on Haiku has no sync files, which radv_amdgpu_cs_submit_zero() merges the waits of
+ * a submission without command buffers into (its export fails with ENOSYS, and that used to be
+ * reported as a lost device). Such a submission is common: wgpu orders its submissions with a
+ * binary semaphore, so an empty one (to signal its fence) waits for the one before. Submit a
+ * command stream of NOPs instead: the kernel waits for and signals the syncobjs as for any
+ * other submission. */
+static bool
+radv_amdgpu_cs_can_submit_nop(enum amd_ip_type ip_type)
+{
+   return ip_type == AMD_IP_GFX || ip_type == AMD_IP_COMPUTE || ip_type == AMD_IP_SDMA;
+}
+
+static VkResult
+radv_amdgpu_cs_submit_nop(struct radv_amdgpu_ctx *ctx, enum amd_ip_type ip_type, int queue_idx,
+                          struct radv_winsys_sem_info *sem_info)
+{
+   VkResult result = VK_SUCCESS;
+
+   simple_mtx_lock(&ctx->nop_cs_lock);
+   if (!ctx->nop_cs[ip_type]) {
+      struct ac_cmdbuf *cs = radv_amdgpu_cs_create(&ctx->ws->base, ip_type, false);
+      if (!cs) {
+         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      } else {
+         /* An empty stream is padded with NOPs. */
+         result = radv_amdgpu_cs_finalize(cs);
+         if (result == VK_SUCCESS)
+            ctx->nop_cs[ip_type] = cs;
+         else
+            radv_amdgpu_cs_destroy(cs);
+      }
+   }
+   simple_mtx_unlock(&ctx->nop_cs_lock);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Only read once finalized, so submissions on several queues may share it. */
+   return radv_amdgpu_winsys_cs_submit_internal(ctx, queue_idx, sem_info, &ctx->nop_cs[ip_type], 1, NULL, 0, NULL, 0,
+                                                NULL, 0, false);
+}
+#endif
+
 static VkResult
 radv_amdgpu_cs_submit_zero(struct radv_amdgpu_ctx *ctx, enum amd_ip_type ip_type, int queue_idx,
                            struct radv_winsys_sem_info *sem_info)
@@ -1273,6 +1316,11 @@ radv_amdgpu_cs_submit_zero(struct radv_amdgpu_ctx *ctx, enum amd_ip_type ip_type
 
    if (!queue_syncobj)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+#ifdef __HAIKU__
+   if ((sem_info->wait.syncobj_count || sem_info->wait.timeline_syncobj_count) && radv_amdgpu_cs_can_submit_nop(ip_type))
+      return radv_amdgpu_cs_submit_nop(ctx, ip_type, queue_idx, sem_info);
+#endif
 
    if (sem_info->wait.syncobj_count || sem_info->wait.timeline_syncobj_count) {
       int fd;
@@ -1627,6 +1675,10 @@ radv_amdgpu_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority prior
    if (!ctx)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+#ifdef __HAIKU__
+   simple_mtx_init(&ctx->nop_cs_lock, mtx_plain);
+#endif
+
    r = ac_drm_cs_ctx_create2(ws->dev, amdgpu_priority, &ctx->ctx_handle);
    if (r && r == -EACCES) {
       result = VK_ERROR_NOT_PERMITTED;
@@ -1652,6 +1704,9 @@ radv_amdgpu_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority prior
 fail_alloc:
    ac_drm_cs_ctx_free(ws->dev, ctx->ctx_handle);
 fail_create:
+#ifdef __HAIKU__
+   simple_mtx_destroy(&ctx->nop_cs_lock);
+#endif
    FREE(ctx);
    return result;
 }
@@ -1667,6 +1722,14 @@ radv_amdgpu_ctx_destroy(struct radeon_winsys_ctx *rwctx)
             ac_drm_cs_destroy_syncobj(ctx->ws->dev, ctx->queue_syncobj[ip][ring]);
       }
    }
+
+#ifdef __HAIKU__
+   for (unsigned ip = 0; ip <= AMDGPU_HW_IP_NUM; ++ip) {
+      if (ctx->nop_cs[ip])
+         radv_amdgpu_cs_destroy(ctx->nop_cs[ip]);
+   }
+   simple_mtx_destroy(&ctx->nop_cs_lock);
+#endif
 
    ctx->ws->base.buffer_destroy(&ctx->ws->base, ctx->fence_bo);
    ac_drm_cs_ctx_free(ctx->ws->dev, ctx->ctx_handle);

@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "util/simple_mtx.h"
 #include "radv_amdgpu_winsys.h"
 #include "radv_radeon_winsys.h"
 
@@ -34,6 +35,13 @@ struct radv_amdgpu_ctx {
 
    uint32_t queue_syncobj[AMDGPU_HW_IP_NUM + 1][MAX_RINGS_PER_TYPE];
    bool queue_syncobj_wait[AMDGPU_HW_IP_NUM + 1][MAX_RINGS_PER_TYPE];
+
+#ifdef __HAIKU__
+   /* A command stream of NOPs per IP, for submissions without command buffers that have to wait
+    * (radv_amdgpu_cs_submit_nop): made when first needed, under nop_cs_lock. */
+   simple_mtx_t nop_cs_lock;
+   struct ac_cmdbuf *nop_cs[AMDGPU_HW_IP_NUM + 1];
+#endif
 };
 
 static inline struct radv_amdgpu_ctx *

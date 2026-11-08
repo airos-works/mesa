@@ -68,6 +68,8 @@ to_kmod_bo_flags(uint32_t flags)
       kmod_bo_flags |= PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT;
    if (flags & PAN_BO_INVISIBLE)
       kmod_bo_flags |= PAN_KMOD_BO_FLAG_NO_MMAP;
+   if (flags & PAN_BO_CPU_CACHED)
+      kmod_bo_flags |= PAN_KMOD_BO_FLAG_HAIKU_CPU_CACHED;
 
    return kmod_bo_flags;
 }

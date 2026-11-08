@@ -16,6 +16,11 @@ static const uint32_t kMapBuffer = 0x4d435313;
 static const uint32_t kGetBufferInfo = 0x4d435314;
 static const uint32_t kClientCpuBuffers = 1;
 static const uint32_t kBufferNormalNoncacheable = 1;
+// BufferCreate.flags: CPU-cached (write-back) mapping; the client keeps the
+// caches coherent with the GPU (dc cvac / dc civac). Announced by
+// kClientCachedBuffers in ClientInfo.capabilities.
+static const uint32_t kBufferCpuCached = 2;
+static const uint32_t kClientCachedBuffers = 64;
 // Panfrost keeps one BO per texture, buffer and pool slab and caches freed
 // ones, so a WebKit process (compositor plus WebGL) holds thousands of them.
 static const uint32_t kMaxClientBuffers = 4096;

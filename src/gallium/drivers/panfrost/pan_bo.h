@@ -57,6 +57,10 @@
  * PAN_BO_SHARED if the BO has not been exported yet */
 #define PAN_BO_SHAREABLE (1 << 5)
 
+/* Haiku: the CPU maps the BO cached; panfrost_ptr_map/unmap keep the CPU
+ * caches coherent with the GPU. For buffers the CPU reads back. */
+#define PAN_BO_CPU_CACHED (1 << 6)
+
 /* GPU access flags */
 
 /* BO is either shared (can be accessed by more than one GPU batch) or private

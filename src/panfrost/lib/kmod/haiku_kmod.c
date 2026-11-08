@@ -174,7 +174,7 @@ static struct pan_kmod_bo *haiku_bo_alloc(struct pan_kmod_dev *dev,
    struct pan_kmod_vm *exclusive_vm, uint64_t size, uint32_t flags)
 {
    const uint32_t supported = PAN_KMOD_BO_FLAG_EXECUTABLE | PAN_KMOD_BO_FLAG_NO_MMAP
-      | PAN_KMOD_BO_FLAG_GPU_UNCACHED;
+      | PAN_KMOD_BO_FLAG_GPU_UNCACHED | PAN_KMOD_BO_FLAG_HAIKU_CPU_CACHED;
    if (flags & ~supported || !size || (size & 4095)
        || (exclusive_vm && exclusive_vm->dev != dev)) {
       errno = EINVAL;
@@ -184,7 +184,7 @@ static struct pan_kmod_bo *haiku_bo_alloc(struct pan_kmod_dev *dev,
    if (!bo) { errno = ENOMEM; return NULL; }
    bo->map.area = -1;
    uint32_t handle;
-   if (pan_haiku_buffer_create(dev->fd, size, &handle)) goto fail;
+   if (pan_haiku_buffer_create(dev->fd, size, (flags & PAN_KMOD_BO_FLAG_HAIKU_CPU_CACHED) != 0, &handle)) goto fail;
    if (exclusive_vm)
       bo->sync_handle = container_of(exclusive_vm, struct haiku_vm, base)->sync_handle;
    else if (pan_haiku_sync_create(dev->fd, 1, &bo->sync_handle)) {

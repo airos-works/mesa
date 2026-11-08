@@ -106,6 +106,10 @@ enum pan_kmod_bo_flags {
     * is called.
     */
    PAN_KMOD_BO_FLAG_GPU_UNCACHED = BITFIELD_BIT(5),
+
+   /* Haiku: map for the CPU cached (write-back) instead of write-combined; the
+    * user keeps the CPU caches coherent with the GPU. For read-backs. */
+   PAN_KMOD_BO_FLAG_HAIKU_CPU_CACHED = BITFIELD_BIT(6),
 };
 
 /* Allowed group priority flags. */

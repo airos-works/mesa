@@ -1069,6 +1069,12 @@ panfrost_can_create_resource(struct pipe_screen *screen,
    return tmp.plane.layout.data_size_B <= system_memory / 4;
 }
 
+#if DETECT_OS_HAIKU
+#include "kmod/haiku_csf_native.h"
+static bool pan_haiku_cached_staging(void);
+static void pan_haiku_sync_cpu_cache(const void *start, size_t bytes, bool invalidate);
+#endif
+
 static struct pipe_resource *
 panfrost_resource_create_with_modifier(struct pipe_screen *screen,
                                        const struct pipe_resource *template,
@@ -1104,6 +1110,23 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
        */
       so->modifier_constant = true;
    }
+
+#if DETECT_OS_HAIKU
+   /* Read-back and upload staging (PIPE_USAGE_STAGING) the CPU maps: linear
+    * and CPU-cached when the driver offers it. haiku#71 */
+   const bool cpu_cached =
+      !(template->bind & PAN_BIND_SHARED_MASK) &&
+      template->usage == PIPE_USAGE_STAGING &&
+      !(template->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT | PIPE_RESOURCE_FLAG_MAP_COHERENT)) &&
+      !util_format_is_depth_or_stencil(template->format) &&
+      (template->target == PIPE_BUFFER || modifier == DRM_FORMAT_MOD_INVALID ||
+       modifier == DRM_FORMAT_MOD_LINEAR) &&
+      pan_haiku_cached_staging() && pan_haiku_client_has_cached_buffers();
+   if (cpu_cached && template->target != PIPE_BUFFER) {
+      modifier = DRM_FORMAT_MOD_LINEAR;
+      so->modifier_constant = true;
+   }
+#endif
 
    panfrost_resource_setup(screen, so, modifier, template->format, plane_idx);
 
@@ -1174,6 +1197,10 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
       /* If the resource is never exported, we can make the BO private. */
       if (template->bind & PIPE_BIND_SHARED)
          flags |= PAN_BO_SHAREABLE;
+#if DETECT_OS_HAIKU
+      else if (cpu_cached)
+         flags |= PAN_BO_CPU_CACHED;
+#endif
 
       char *res_label =
          panfrost_resource_new_label(so, so->image.props.modifier , NULL);
@@ -1584,6 +1611,49 @@ pan_haiku_first_full_write_untiles(void)
 }
 #endif
 
+#if DETECT_OS_HAIKU
+/* PAN_HAIKU_CACHED_STAGING=0: read-back buffers (PIPE_USAGE_STAGING) stay
+ * write-combined. Otherwise they are CPU-cached where the driver offers it
+ * (mali_csf kBufferCpuCached) and the CPU reads them at cache speed: the
+ * GPU does not snoop the CPU's caches, so their lines are cleaned and
+ * invalidated before a read and cleaned after a write (dc civac / dc cvac,
+ * which user code may run on Haiku arm64). haiku#71. */
+static bool
+pan_haiku_cached_staging(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *value = getenv("PAN_HAIKU_CACHED_STAGING");
+      enabled = !value || value[0] != '0';
+   }
+   return enabled;
+}
+
+static void
+pan_haiku_sync_cpu_cache(const void *start, size_t bytes, bool invalidate)
+{
+#if defined(__aarch64__)
+   if (!bytes)
+      return;
+   uint64_t ctr;
+   __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+   const uintptr_t line = 4u << ((ctr >> 16) & 0xf);
+   uintptr_t p = (uintptr_t)start & ~(line - 1);
+   const uintptr_t end = (uintptr_t)start + bytes;
+   __asm__ volatile("dsb sy" ::: "memory");
+   for (; p < end; p += line) {
+      if (invalidate)
+         __asm__ volatile("dc civac, %0" ::"r"(p) : "memory");
+      else
+         __asm__ volatile("dc cvac, %0" ::"r"(p) : "memory");
+   }
+   __asm__ volatile("dsb sy" ::: "memory");
+#else
+   (void)start; (void)bytes; (void)invalidate;
+#endif
+}
+#endif
+
 static void *
 panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
                  unsigned level,
@@ -1767,7 +1837,15 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
          if (newbo) {
             if (copy_resource) {
+#if DETECT_OS_HAIKU
+               if (flags & PAN_BO_CPU_CACHED)
+                  pan_haiku_sync_cpu_cache(rsrc->bo->ptr.cpu, panfrost_bo_size(bo), true);
+#endif
                memcpy(newbo->ptr.cpu, rsrc->bo->ptr.cpu, panfrost_bo_size(bo));
+#if DETECT_OS_HAIKU
+               if (flags & PAN_BO_CPU_CACHED)
+                  pan_haiku_sync_cpu_cache(newbo->ptr.cpu, panfrost_bo_size(bo), false);
+#endif
             }
 
             /* Swap the pointers, dropping a reference to
@@ -1852,11 +1930,26 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
             transfer->base.box.x, transfer->base.box.width);
       }
 
-      return bo->ptr.cpu + rsrc->plane.layout.slices[level].offset_B +
+      void *direct = bo->ptr.cpu + rsrc->plane.layout.slices[level].offset_B +
              box->z * transfer->base.layer_stride +
              box_blocks.y *
                 rsrc->plane.layout.slices[level].tiled_or_linear.row_stride_B +
              box_blocks.x * bytes_per_block;
+#if DETECT_OS_HAIKU
+      /* The GPU does not snoop the CPU caches. Drop any line (stale, or
+       * prefetched while the GPU wrote) before the CPU touches the range;
+       * a partial-line CPU write must not later clean stale bytes over
+       * what the GPU wrote. Unmap cleans what the CPU wrote. */
+      if (bo->flags & PAN_BO_CPU_CACHED) {
+         transfer->cached_start = direct;
+         transfer->cached_bytes =
+            (box->depth - 1) * transfer->base.layer_stride +
+            (box_blocks.height - 1) * transfer->base.stride +
+            box_blocks.width * bytes_per_block;
+         pan_haiku_sync_cpu_cache(direct, transfer->cached_bytes, true);
+      }
+#endif
+      return direct;
    }
 }
 
@@ -2383,6 +2476,12 @@ panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
 
    if (transfer->usage & PIPE_MAP_WRITE)
       prsrc->valid.crc = false;
+
+#if DETECT_OS_HAIKU
+   /* The GPU reads RAM: write back what the CPU wrote into a cached buffer. */
+   if ((transfer->usage & PIPE_MAP_WRITE) && trans->cached_bytes)
+      pan_haiku_sync_cpu_cache(trans->cached_start, trans->cached_bytes, false);
+#endif
 
    /* AFBC/AFRC will use a staging resource. `initialized` will be set when
     * the fragment job is created; this is deferred to prevent useless surface

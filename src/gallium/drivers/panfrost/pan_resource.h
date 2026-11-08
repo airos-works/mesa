@@ -154,6 +154,9 @@ struct panfrost_transfer {
       struct pipe_resource *rsrc;
       struct pipe_box box;
    } staging;
+   /* Haiku: range of a CPU-cached BO mapped directly, cleaned on unmap */
+   void *cached_start;
+   size_t cached_bytes;
 };
 
 static inline struct panfrost_transfer *

@@ -41,6 +41,13 @@ static int Call(int fd, uint32_t op, Request& request)
    return NativeIoctl(fd, op, &request, sizeof(request));
 }
 
+static uint32_t sClientCapabilities;
+
+int pan_haiku_client_has_cached_buffers(void)
+{
+   return (sClientCapabilities & kClientCachedBuffers) != 0;
+}
+
 int pan_haiku_check_client(int fd)
 {
    ClientInfo info{};
@@ -50,13 +57,15 @@ int pan_haiku_check_client(int fd)
       | kClientSynchronization | kClientHeaps | kClientProperties;
    if (info.version != kClientVersion || (info.capabilities & needed) != needed)
       return Fail(ENOTSUP);
+   sClientCapabilities = info.capabilities;
    return 0;
 }
 
-int pan_haiku_buffer_create(int fd, uint64_t bytes, uint32_t* handle)
+int pan_haiku_buffer_create(int fd, uint64_t bytes, bool cpuCached, uint32_t* handle)
 {
    if (handle == NULL) return Fail(EINVAL);
-   BufferCreate request{kClientVersion, 0, bytes, 0, 0, 0};
+   const uint32_t flags = cpuCached && pan_haiku_client_has_cached_buffers() ? kBufferCpuCached : 0;
+   BufferCreate request{kClientVersion, flags, bytes, 0, 0, 0};
    if (Call(fd, kCreateBuffer, request) != 0) return -1;
    *handle = request.handle;
    return 0;

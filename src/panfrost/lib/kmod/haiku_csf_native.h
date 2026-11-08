@@ -3,6 +3,7 @@
 #define PAN_HAIKU_CSF_NATIVE_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -60,7 +61,8 @@ struct pan_haiku_heap {
 };
 
 int pan_haiku_check_client(int fd);
-int pan_haiku_buffer_create(int fd, uint64_t bytes, uint32_t *handle);
+int pan_haiku_buffer_create(int fd, uint64_t bytes, bool cpuCached, uint32_t *handle);
+int pan_haiku_client_has_cached_buffers(void);
 int pan_haiku_buffer_destroy(int fd, uint32_t handle);
 int pan_haiku_buffer_map(int fd, uint32_t handle, struct pan_haiku_map *map);
 int pan_haiku_buffer_unmap(int32_t area);

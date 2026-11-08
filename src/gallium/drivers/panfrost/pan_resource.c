@@ -1565,6 +1565,25 @@ panfrost_can_discard(struct pipe_resource *resource, const struct pipe_box *box,
            !(rsrc->bo->flags & PAN_BO_SHARED));
 }
 
+#if DETECT_OS_HAIKU
+/* An AFBC texture whose first CPU write fills it (a compositor tile's upload)
+ * becomes u-interleaved at once, which costs no copy, instead of taking a
+ * staging BO, a blit and a flush for that upload and each one after it. On the
+ * ROCK 5 a new tab's first frame came 11 ms sooner (tabs 95 -> 84 ms) and
+ * MotionMark 1.3.1 was unchanged (303.0 / 306.1).
+ * PAN_HAIKU_FIRST_UPLOAD_UNTILED=0 keeps such textures in AFBC. */
+static bool
+pan_haiku_first_full_write_untiles(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *value = getenv("PAN_HAIKU_FIRST_UPLOAD_UNTILED");
+      enabled = !value || value[0] != '0';
+   }
+   return enabled;
+}
+#endif
+
 static void *
 panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
                  unsigned level,
@@ -1611,7 +1630,10 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
        !(rsrc->base.bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT |
                             PIPE_BIND_DISPLAY_TARGET)) &&
        panfrost_should_tile(dev, rsrc, rsrc->base.format) &&
-       ++rsrc->cpu_afbc_writes >= PAN_HAIKU_CPU_AFBC_WRITES) {
+       (++rsrc->cpu_afbc_writes >= PAN_HAIKU_CPU_AFBC_WRITES ||
+        (pan_haiku_first_full_write_untiles() && !BITSET_TEST(rsrc->valid.data, level) &&
+         box->x == 0 && box->y == 0 && box->width == (int)rsrc->base.width0 &&
+         box->height == (int)rsrc->base.height0))) {
       pan_resource_modifier_convert(
          ctx, rsrc, DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
          BITSET_TEST(rsrc->valid.data, level), "CPU writes into AFBC");

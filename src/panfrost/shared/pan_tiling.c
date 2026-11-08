@@ -28,6 +28,8 @@
 #include "pan_tiling.h"
 #include <math.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 #include "util/macros.h"
 #include "util/ralloc.h"
 
@@ -304,6 +306,54 @@ pan_access_tiled_image_generic(void *dst, void *src, unsigned sx, unsigned sy,
          TILED_ALIGNED_VARIANT(PAN_INTERLEAVE_NONE, store, 128, 128, 4);       \
    }
 
+/* Order of the 2x2 quads of a 16x16 u-interleaved tile: quad q holds pixels
+ * (x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1) with x = pan_quad_x[q] and
+ * y = pan_quad_y[q], at bytes 16q to 16q + 15 for 32-bit pixels. */
+static const uint8_t pan_quad_x[64] = {0, 2, 2, 0, 4, 6, 6, 4, 4, 6, 6, 4, 0, 2, 2, 0, 8, 10, 10, 8, 12, 14, 14, 12, 12, 14, 14, 12, 8, 10, 10, 8, 8, 10, 10, 8, 12, 14, 14, 12, 12, 14, 14, 12, 8, 10, 10, 8, 0, 2, 2, 0, 4, 6, 6, 4, 4, 6, 6, 4, 0, 2, 2, 0};
+static const uint8_t pan_quad_y[64] = {0, 0, 2, 2, 0, 0, 2, 2, 4, 4, 6, 6, 4, 4, 6, 6, 0, 0, 2, 2, 0, 0, 2, 2, 4, 4, 6, 6, 4, 4, 6, 6, 8, 8, 10, 10, 8, 8, 10, 10, 12, 12, 14, 14, 12, 12, 14, 14, 8, 8, 10, 10, 8, 8, 10, 10, 12, 12, 14, 14, 12, 12, 14, 14};
+
+/* Store a tile-aligned 32-bit region in destination order: each 16x16 tile's
+ * 1 KiB is written front to back, a 2x2 quad (16 bytes) at a time, instead of
+ * 4-byte stores scattered across 16 tiles per source row. Texture memory is
+ * usually write-combined, where scattered stores each cost a partial burst.
+ * PAN_TILE_DST_ORDER=0 uses the source-order loop. */
+static void
+pan_store_tiled_aligned_32_dst_order(void *dst, const void *src, unsigned sx,
+                                     unsigned sy, unsigned w, unsigned h,
+                                     uint32_t dst_stride, uint32_t src_stride)
+{
+   for (unsigned ty = 0; ty < h / 16; ++ty) {
+      const uint8_t *src_rows = (const uint8_t *)src + ty * 16 * src_stride;
+      uint8_t *dst_row = (uint8_t *)dst + ((sy >> 4) + ty) * dst_stride +
+                         (sx >> 4) * 16 * 16 * 4;
+      for (unsigned tx = 0; tx < w / 16; ++tx) {
+         const uint8_t *s = src_rows + tx * 16 * 4;
+         uint32_t *d = (uint32_t *)(dst_row + tx * 16 * 16 * 4);
+         for (unsigned q = 0; q < 64; ++q, d += 4) {
+            const uint8_t *r0 = s + pan_quad_y[q] * src_stride + pan_quad_x[q] * 4;
+            const uint8_t *r1 = r0 + src_stride;
+            uint32_t p[4];
+            memcpy(&p[0], r0, 8);
+            memcpy(&p[2], r1, 4);
+            memcpy(&p[3], r1 + 4, 4);
+            uint32_t q4[4] = {p[0], p[1], p[3], p[2]};
+            memcpy(d, q4, 16);
+         }
+      }
+   }
+}
+
+static bool
+pan_tile_dst_order(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *value = getenv("PAN_TILE_DST_ORDER");
+      enabled = !value || value[0] != '0';
+   }
+   return enabled;
+}
+
 /* Optimized variant of pan_access_tiled_image_generic except that requires
  * sx/sy/w/h to be tile-aligned, and bpp to be a power of two */
 static void
@@ -320,6 +370,13 @@ pan_access_tiled_image_generic_aligned(
    assert(w % TILE_WIDTH == 0);
    assert(h % TILE_HEIGHT == 0);
    assert(util_is_power_of_two_nonzero(bpp));
+
+   if (is_store && bpp == 32 && interleave == PAN_INTERLEAVE_NONE &&
+       pan_tile_dst_order()) {
+      pan_store_tiled_aligned_32_dst_order(dst, src, sx, sy, w, h, dst_stride,
+                                           src_stride);
+      return;
+   }
 
    if (is_store)
       TILED_ALIGNED_VARIANTS(true)

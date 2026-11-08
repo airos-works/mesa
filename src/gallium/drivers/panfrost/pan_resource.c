@@ -1071,7 +1071,7 @@ panfrost_can_create_resource(struct pipe_screen *screen,
 
 #if DETECT_OS_HAIKU
 #include "kmod/haiku_csf_native.h"
-static bool pan_haiku_cached_staging(void);
+static int pan_haiku_cached_staging(void);
 static void pan_haiku_sync_cpu_cache(const void *start, size_t bytes, bool invalidate);
 #endif
 
@@ -1116,7 +1116,8 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
     * and CPU-cached when the driver offers it. haiku#71 */
    const bool cpu_cached =
       !(template->bind & PAN_BIND_SHARED_MASK) &&
-      template->usage == PIPE_USAGE_STAGING &&
+      ((template->flags & PIPE_RESOURCE_FLAG_DRV_PRIV) ||
+       (template->usage == PIPE_USAGE_STAGING && pan_haiku_cached_staging() == 1)) &&
       !(template->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT | PIPE_RESOURCE_FLAG_MAP_COHERENT)) &&
       !util_format_is_depth_or_stencil(template->format) &&
       (template->target == PIPE_BUFFER || modifier == DRM_FORMAT_MOD_INVALID ||
@@ -1346,7 +1347,7 @@ panfrost_resource_restore_format(struct panfrost_resource *rsrc,
 
 static struct panfrost_resource *
 pan_alloc_staging(struct panfrost_context *ctx, struct panfrost_resource *rsc,
-                  unsigned level, const struct pipe_box *box)
+                  unsigned level, const struct pipe_box *box, bool cpu_read)
 {
    struct pipe_context *pctx = &ctx->base;
    struct pipe_resource tmpl = rsc->base;
@@ -1369,6 +1370,11 @@ pan_alloc_staging(struct panfrost_context *ctx, struct panfrost_resource *rsc,
    tmpl.bind |= PIPE_BIND_LINEAR;
    tmpl.bind &= ~PAN_BIND_SHARED_MASK;
    tmpl.compression_rate = PIPE_COMPRESSION_FIXED_RATE_NONE;
+#if DETECT_OS_HAIKU
+   /* Only read by the CPU: CPU-cached where the driver offers it. haiku#71 */
+   if (cpu_read && pan_haiku_cached_staging())
+      tmpl.flags |= PIPE_RESOURCE_FLAG_DRV_PRIV;
+#endif
 
    struct pipe_resource *pstaging =
       pctx->screen->resource_create(pctx->screen, &tmpl);
@@ -1612,21 +1618,25 @@ pan_haiku_first_full_write_untiles(void)
 #endif
 
 #if DETECT_OS_HAIKU
-/* PAN_HAIKU_CACHED_STAGING=0: read-back buffers (PIPE_USAGE_STAGING) stay
- * write-combined. Otherwise they are CPU-cached where the driver offers it
+/* PAN_HAIKU_CACHED_STAGING: 0 keeps every staging buffer write-combined; 2
+ * (the default) makes the linear copy that a CPU read of an AFBC texture
+ * (glReadPixels of a render target) is blitted into CPU-cached; 1 also caches
+ * every PIPE_USAGE_STAGING resource, uploads included, which cost MotionMark's
+ * Design test ~10 % on the ROCK 5 (cache maintenance on each upload).
+ * Cached buffers are used where the driver offers them
  * (mali_csf kBufferCpuCached) and the CPU reads them at cache speed: the
  * GPU does not snoop the CPU's caches, so their lines are cleaned and
  * invalidated before a read and cleaned after a write (dc civac / dc cvac,
  * which user code may run on Haiku arm64). haiku#71. */
-static bool
+static int
 pan_haiku_cached_staging(void)
 {
-   static int enabled = -1;
-   if (enabled < 0) {
+   static int mode = -1;
+   if (mode < 0) {
       const char *value = getenv("PAN_HAIKU_CACHED_STAGING");
-      enabled = !value || value[0] != '0';
+      mode = value && (value[0] == '0' || value[0] == '1') ? value[0] - '0' : 2;
    }
-   return enabled;
+   return mode;
 }
 
 static void
@@ -1715,7 +1725,8 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
    if (drm_is_afbc(rsrc->modifier) ||
        drm_is_afrc(rsrc->modifier)) {
       struct panfrost_resource *staging =
-         pan_alloc_staging(ctx, rsrc, level, box);
+         pan_alloc_staging(ctx, rsrc, level, box,
+                           (usage & PIPE_MAP_READ) && !(usage & PIPE_MAP_WRITE));
       assert(staging);
 
       /* Staging resources have one LOD: level 0. Query the strides
@@ -1748,6 +1759,13 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
       if (panfrost_bo_mmap(staging->bo))
          return NULL;
+
+#if DETECT_OS_HAIKU
+      /* What the GPU blitted is in RAM; drop any stale or prefetched line. */
+      if (staging->bo->flags & PAN_BO_CPU_CACHED)
+         pan_haiku_sync_cpu_cache(staging->bo->ptr.cpu,
+                                  transfer->base.layer_stride * box->depth, true);
+#endif
 
       return staging->bo->ptr.cpu;
    }

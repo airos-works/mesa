@@ -16,10 +16,13 @@ static const uint32_t kMapBuffer = 0x4d435313;
 static const uint32_t kGetBufferInfo = 0x4d435314;
 static const uint32_t kClientCpuBuffers = 1;
 static const uint32_t kBufferNormalNoncacheable = 1;
-// BufferCreate.flags: CPU-cached (write-back) mapping; the client keeps the
-// caches coherent with the GPU (dc cvac / dc civac). Announced by
-// kClientCachedBuffers in ClientInfo.capabilities.
+// BufferCreate.flags: the CPU maps this buffer cached (normal write-back
+// memory) instead of write-combined. The GPU does not snoop the CPU's caches:
+// the client cleans what the CPU wrote before the GPU reads it and cleans and
+// invalidates before reading what the GPU wrote (dc cvac / dc civac, which
+// user code may run on Haiku arm64). For buffers the CPU reads (read-backs).
 static const uint32_t kBufferCpuCached = 2;
+// ClientInfo.capabilities: kBufferCpuCached is accepted.
 static const uint32_t kClientCachedBuffers = 64;
 // Panfrost keeps one BO per texture, buffer and pool slab and caches freed
 // ones, so a WebKit process (compositor plus WebGL) holds thousands of them.

@@ -294,7 +294,14 @@ _mesa_fence_sync(struct gl_context *ctx, GLenum condition, GLbitfield flags)
       assert(syncObj->fence == NULL);
 
       /* Deferred flush are only allowed when there's a single context. See issue 1430 */
-      ctx->pipe->flush(ctx->pipe, &syncObj->fence, ctx->Shared->RefCount == 1 ? PIPE_FLUSH_DEFERRED : 0);
+      /* Shared contexts: an asynchronous flush, which a driver with a submit
+       * thread (zink) queues instead of waiting for. The fence is still
+       * flushed for the other contexts (issue 1430): waiting on it waits for
+       * the submission first. A synchronous one waited behind every batch the
+       * group's other contexts had queued: 35 ms on the main thread, three
+       * times a second, with Summit's tile painting threads busy on NVK.
+       */
+      ctx->pipe->flush(ctx->pipe, &syncObj->fence, ctx->Shared->RefCount == 1 ? PIPE_FLUSH_DEFERRED : PIPE_FLUSH_ASYNC);
 
       simple_mtx_lock(&ctx->Shared->Mutex);
       _mesa_set_add(ctx->Shared->SyncObjects, syncObj);

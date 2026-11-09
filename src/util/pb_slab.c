@@ -91,8 +91,22 @@ pb_slabs_reclaim_locked(struct pb_slabs *slabs)
        * the driver should not walk the entire list, as this is likely to
        * result in zero reclaims if the first few entries fail to reclaim
        */
-      } else if (++num_failed_reclaims >= MAX_FAILED_RECLAIMS) {
-         break;
+      } else {
+         /* An entry that cannot be reclaimed yet goes to the back of the
+          * list. The walk stops after MAX_FAILED_RECLAIMS of them, so two
+          * that stay busy at the front hid every entry behind them for good:
+          * zink tracks a buffer's last use by the batch state it was in, and
+          * a state reused for the open batch of a context that has gone idle
+          * keeps its old buffers "unflushed" until that context flushes
+          * again. With Summit's tile painting threads idle beside a busy
+          * canvas, no slab was ever reclaimed and every vertex upload took a
+          * new 2 MB one, until the machine ran out of memory (16 GB in four
+          * minutes of MotionMark on the X399).
+          */
+         list_del(&entry->head);
+         list_addtail(&entry->head, &slabs->reclaim);
+         if (++num_failed_reclaims >= MAX_FAILED_RECLAIMS)
+            break;
       }
    }
    return num_reclaims;

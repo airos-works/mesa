@@ -4263,7 +4263,9 @@ zink_flush(struct pipe_context *pctx,
          /* reuse last fence */
          bs = ctx->last_batch_state;
       }
-      if (!deferred) {
+      /* An asynchronous flush does not wait for the last submission either
+       * (glFenceSync right after glFlush has nothing new to flush). */
+      if (!deferred && !(flags & PIPE_FLUSH_ASYNC)) {
          struct zink_batch_state *last = ctx->last_batch_state;
          if (last) {
             sync_flush(ctx, last);

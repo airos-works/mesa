@@ -68,12 +68,14 @@ extern "C" {
 #endif
 #ifdef GALLIUM_RADEONSI
 #include "haiku_drm_present.h"
+#include "haiku_glview_present.h"
 #endif
 #if defined(GALLIUM_ZINK) || defined(GALLIUM_RADEONSI)
 #include "main/mtypes.h"
 #endif
 
 #include <Bitmap.h>
+#include <Screen.h>
 
 extern "C" {
 #include "target-helpers/inline_sw_helper.h"
@@ -109,7 +111,84 @@ struct haiku_egl_surface {
    _EGLSurface base;
    struct hgl_buffer *fb;
    struct pipe_fence_handle *throttle_fence;
+
+   /* Bitmaps the window has handed back, for the next frames: making one
+    * is a round trip to the window system. */
+   BBitmap *spare[2];
+   /* The view's BGLView takes frames straight into the screen when its
+    * window is a direct one (haiku_glview_present.h). */
+   bool glview;
+   /* The frame enlarged to the size the view covers on the screen. */
+   struct pipe_resource *scaled;
+   /* Held while a frame is presented and front and back change places, and
+    * while the last frame is put back from another thread. */
+   mtx_t present_lock;
 };
+
+/* The window system waits this long for a blank at most: a display that is
+ * switched off reports none. */
+static const bigtime_t kRetraceTimeout = 50000;
+
+static void
+wait_for_retrace(void)
+{
+   BScreen(B_MAIN_SCREEN_ID).WaitForRetrace(kRetraceTimeout);
+}
+
+#ifdef GALLIUM_RADEONSI
+/* libGL's side of haiku_glview_present.h, when it has one. */
+static const struct haiku_glview_api *
+glview_api(void)
+{
+   static const struct haiku_glview_api *api = [] {
+      typedef const struct haiku_glview_api *(*api_function)(void);
+      api_function function = (api_function)dlsym(RTLD_DEFAULT,
+                                                  "haiku_glview_api");
+      const struct haiku_glview_api *api = function ? function() : NULL;
+      return api != NULL && api->version >= HAIKU_GLVIEW_API_VERSION
+         ? api : NULL;
+   }();
+   return api;
+}
+
+static void
+glview_completed(void *window)
+{
+   glview_api()->completed(window);
+}
+
+/* Puts the last frame back into the screen: libGL calls this when the
+ * window was uncovered after the program stopped drawing, with the view's
+ * context current on this thread. */
+static void
+glview_represent(void *data)
+{
+   struct haiku_egl_surface *hgl_surf = (struct haiku_egl_surface *)data;
+   _EGLContext *current = _eglGetCurrentContext();
+   if (current == NULL || haiku_egl_context(current)->ctx == NULL)
+      return;
+   struct st_context *st = haiku_egl_context(current)->ctx->st;
+   _mesa_glthread_finish(st->ctx);
+
+   const struct haiku_glview_api *api = glview_api();
+   void *window = hgl_surf->fb->winsysContext;
+   mtx_lock(&hgl_surf->present_lock);
+   struct pipe_resource *front = hgl_surf->fb->textures[ST_ATTACHMENT_FRONT_LEFT];
+   struct haiku_glview_target target;
+   int result = 1;
+   if (front != NULL && api->target(window, 0, &target)) {
+      result = haiku_drm_present_view(st->pipe, front, &target,
+                                      &hgl_surf->scaled, NULL, NULL);
+      api->presented(window, result == 0 ? HAIKU_GLVIEW_PRESENTED
+                                         : HAIKU_GLVIEW_NOT_PRESENTED);
+   }
+   if (getenv("HGL_TRACE") != NULL) {
+      fprintf(stderr, "egl_haiku: the last frame back into the screen: %d "
+              "(front %p)\n", result, front);
+   }
+   mtx_unlock(&hgl_surf->present_lock);
+}
+#endif
 
 static void update_size(struct hgl_buffer *buffer);
 
@@ -132,11 +211,35 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
    }
 
    const unsigned width = texture->width0, height = texture->height0;
-   BBitmap *bitmap = new(std::nothrow) BBitmap(
-      BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
-   if (!bitmap || bitmap->InitCheck() != B_OK) {
-      delete bitmap;
-      return false;
+   struct haiku_egl_surface *hgl_surf =
+      (struct haiku_egl_surface *)buffer->present_data;
+
+   /* A bitmap the window handed back, when one of this size is there: no
+    * round trip to the window system to make another. The window is done
+    * with it - it hands one back only after drawing the next. */
+   BBitmap *bitmap = NULL;
+   for (unsigned i = 0; hgl_surf != NULL && i < ARRAY_SIZE(hgl_surf->spare); i++) {
+      BBitmap *spare = hgl_surf->spare[i];
+      if (spare == NULL)
+         continue;
+      hgl_surf->spare[i] = NULL;
+      if (bitmap == NULL && spare->Bounds().IntegerWidth() + 1 == (int32)width
+          && spare->Bounds().IntegerHeight() + 1 == (int32)height) {
+         bitmap = spare;
+      } else if (spare->Bounds().IntegerWidth() + 1 != (int32)width
+                 || spare->Bounds().IntegerHeight() + 1 != (int32)height) {
+         delete spare;
+      } else {
+         hgl_surf->spare[i] = spare;
+      }
+   }
+   if (bitmap == NULL) {
+      bitmap = new(std::nothrow) BBitmap(
+         BRect(0, 0, width - 1, height - 1), 0, B_RGBA32);
+      if (!bitmap || bitmap->InitCheck() != B_OK) {
+         delete bitmap;
+         return false;
+      }
    }
 
    const size_t row_bytes = size_t(width) * 4;
@@ -155,12 +258,27 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
       return false;
    }
 
-   memset(bitmap->Bits(), 0, bitmap->BitsLength());
-   for (unsigned y = 0; y < height; ++y)
-      memcpy(static_cast<uint8_t *>(bitmap->Bits()) + size_t(y) * bitmap->BytesPerRow(),
-             pixels + size_t(y) * transfer->stride, row_bytes);
+   /* Every row is written in full, so nothing needs clearing first. */
+   if (bitmap->BytesPerRow() == int64_t(row_bytes) && transfer->stride == row_bytes) {
+      memcpy(bitmap->Bits(), pixels, row_bytes * height);
+   } else {
+      for (unsigned y = 0; y < height; ++y)
+         memcpy(static_cast<uint8_t *>(bitmap->Bits()) + size_t(y) * bitmap->BytesPerRow(),
+                pixels + size_t(y) * transfer->stride, row_bytes);
+   }
    pipe->texture_unmap(pipe, transfer);
-   delete static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
+
+   BBitmap *old = static_cast<BitmapHook *>(buffer->winsysContext)->SetBitmap(bitmap);
+   if (old != NULL) {
+      for (unsigned i = 0; hgl_surf != NULL && i < ARRAY_SIZE(hgl_surf->spare); i++) {
+         if (hgl_surf->spare[i] == NULL) {
+            hgl_surf->spare[i] = old;
+            old = NULL;
+            break;
+         }
+      }
+      delete old;
+   }
    return true;
 }
 
@@ -236,8 +354,23 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    }
 
    wgl_surf->fb->update_size = update_size;
+   wgl_surf->fb->present_data = wgl_surf;
+   mtx_init(&wgl_surf->present_lock, mtx_plain);
    if (hgl_dpy->native_csf)
       wgl_surf->fb->present = haiku_present_texture;
+#ifdef GALLIUM_RADEONSI
+   /* radeonsi on amdgpu_drm can copy into the screen's frame buffer */
+   if (hgl_dpy->native_csf && glview_api() != NULL
+       && getenv("HGL_NO_DIRECT_PRESENT") == NULL) {
+      wgl_surf->glview = glview_api()->attach(native_window, wgl_surf,
+                                              glview_represent);
+   }
+   if (getenv("HGL_TRACE") != NULL) {
+      fprintf(stderr, "egl_haiku: window surface: native %d, libGL's view "
+              "%s, %s\n", hgl_dpy->native_csf, glview_api() ? "yes" : "no",
+              wgl_surf->glview ? "attached" : "not attached");
+   }
+#endif
    update_size(wgl_surf->fb);
    wgl_surf->base.Width = wgl_surf->fb->newWidth;
    wgl_surf->base.Height = wgl_surf->fb->newHeight;
@@ -282,6 +415,8 @@ haiku_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf,
       free(wgl_surf);
       return NULL;
    }
+   wgl_surf->fb->present_data = wgl_surf;
+   mtx_init(&wgl_surf->present_lock, mtx_plain);
 
    wgl_surf->fb->newWidth = wgl_surf->base.Width;
    wgl_surf->fb->newHeight = wgl_surf->base.Height;
@@ -308,11 +443,22 @@ haiku_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
       // Unset bitmap to release ownership. Bitmap will be deleted later
       // when destroying framebuffer.
       BitmapHook *bitmapHook = (BitmapHook*)hgl_surf->fb->winsysContext;
+#ifdef GALLIUM_RADEONSI
+      if (hgl_surf->glview) {
+         /* nothing more for the view, and its copies done */
+         glview_api()->detach(bitmapHook);
+         haiku_drm_present_wait_idle();
+         pipe_resource_reference(&hgl_surf->scaled, NULL);
+      }
+#endif
       if (bitmapHook != NULL) {
          BBitmap *bitmap = bitmapHook->SetBitmap(NULL);
          if (hgl_surf->fb->present)
             delete bitmap;
       }
+      for (unsigned i = 0; i < ARRAY_SIZE(hgl_surf->spare); i++)
+         delete hgl_surf->spare[i];
+      mtx_destroy(&hgl_surf->present_lock);
 
       hgl_destroy_st_framebuffer(hgl_surf->fb);
       free(surf);
@@ -392,15 +538,56 @@ haiku_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
 
    // flush back buffer and swap buffers if double buffering is used
    if (backBuffer != NULL) {
-      if (buffer->present) {
-         if (!buffer->present(st->pipe, buffer, backBuffer))
-            return _eglError(EGL_BAD_ALLOC, "Haiku EGL bitmap presentation failed");
-      } else {
-         screen->flush_frontbuffer(screen, st->pipe, backBuffer, 0, 0,
-                                   buffer->winsysContext, 1, NULL);
+      mtx_lock(&hgl_surf->present_lock);
+      bool direct = false;
+#ifdef GALLIUM_RADEONSI
+      /* A view in a direct window: the frame goes straight into the
+       * screen's frame buffer, copied by the GPU, and nothing is read back
+       * or copied by the processor. libGL waits for the blank first when
+       * the swap interval asks for it. */
+      if (hgl_surf->glview) {
+         const struct haiku_glview_api *api = glview_api();
+         void *window = buffer->winsysContext;
+         struct haiku_glview_target target;
+         if (api->target(window, surf->SwapInterval, &target)) {
+            int result = haiku_drm_present_view(st->pipe, backBuffer, &target,
+                                                &hgl_surf->scaled,
+                                                glview_completed, window);
+            direct = result == 0;
+            api->presented(window, direct ? HAIKU_GLVIEW_PRESENTED_ASYNC
+                                          : HAIKU_GLVIEW_NOT_PRESENTED);
+            static int said = 1;
+            if (result != said && getenv("HGL_TRACE") != NULL) {
+               fprintf(stderr, "egl_haiku: present into the screen: %d "
+                       "(%u rects, %ux%u at %d,%d for a %ux%u frame)\n", result,
+                       target.rect_count, target.dest_width, target.dest_height,
+                       target.origin_x, target.origin_y, backBuffer->width0,
+                       backBuffer->height0);
+               said = result;
+            }
+         }
+      }
+#endif
+      if (!direct) {
+         if (buffer->present) {
+            if (!buffer->present(st->pipe, buffer, backBuffer)) {
+               mtx_unlock(&hgl_surf->present_lock);
+               return _eglError(EGL_BAD_ALLOC, "Haiku EGL bitmap presentation failed");
+            }
+         } else {
+            screen->flush_frontbuffer(screen, st->pipe, backBuffer, 0, 0,
+                                      buffer->winsysContext, 1, NULL);
+         }
       }
       std::swap(frontBuffer, backBuffer);
       p_atomic_inc(&buffer->base.stamp);
+      mtx_unlock(&hgl_surf->present_lock);
+
+      /* The frame went to the window system, which shows it at the next
+       * blank: waiting for that paces the program to the display, instead
+       * of it drawing frames nobody sees. */
+      if (!direct && surf->SwapInterval > 0)
+         wait_for_retrace();
    }
 
    // XXX: right front / back if HGL_STEREO?
@@ -409,6 +596,14 @@ haiku_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
 
    st_context_invalidate_state(st, ST_INVALIDATE_FB_STATE);
 
+   return EGL_TRUE;
+}
+
+/* The interval is the surface's (_EGLSurface::SwapInterval), honoured at
+ * each swap. */
+static EGLBoolean
+haiku_swap_interval(_EGLDisplay *disp, _EGLSurface *surf, EGLint interval)
+{
    return EGL_TRUE;
 }
 
@@ -455,6 +650,9 @@ haiku_add_configs_for_visuals(_EGLDisplay *disp)
    conf->base.MaxPbufferHeight = std::min<unsigned>(max_size, _EGL_MAX_PBUFFER_HEIGHT);
    conf->base.MaxPbufferPixels = conf->base.MaxPbufferWidth * conf->base.MaxPbufferHeight;
    conf->base.SurfaceType = EGL_PBUFFER_BIT | EGL_WINDOW_BIT;
+   /* eglSwapInterval: 0 does not wait, 1 waits for the display's blank */
+   conf->base.MinSwapInterval = 0;
+   conf->base.MaxSwapInterval = 1;
 
    TRACE("Config configuated\n");
    if (!_eglValidateConfig(&conf->base, EGL_FALSE)) {
@@ -851,6 +1049,7 @@ extern "C" const _EGLDriver _eglDriver = {
    .CreatePbufferSurface = haiku_create_pbuffer_surface,
    .DestroySurface = haiku_destroy_surface,
    .QuerySurface = haiku_query_surface,
+   .SwapInterval = haiku_swap_interval,
    .SwapBuffers = haiku_swap_buffers,
 };
 

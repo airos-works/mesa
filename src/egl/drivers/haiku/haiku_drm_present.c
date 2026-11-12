@@ -11,6 +11,7 @@
  */
 
 #include "haiku_drm_present.h"
+#include "haiku_glview_present.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -276,6 +277,152 @@ haiku_drm_present(struct pipe_context *pipe, struct pipe_resource *image,
       .fence = fence,
       .completed = p->completed,
       .cookie = p->cookie,
+   };
+   state.queue_count++;
+   state.submitted++;
+   pthread_cond_broadcast(&state.changed);
+   pthread_mutex_unlock(&state.lock);
+   return 0;
+}
+
+
+/* With the lock held: the helper thread is running and the GPU is no more
+ * than in_flight presents behind. */
+static bool
+start_present_locked(struct pipe_screen *screen, unsigned in_flight)
+{
+   if (state.screen != NULL && state.screen != screen)
+      return false;
+   state.screen = screen;
+   if (!state.thread_started) {
+      atexit(release_at_exit);
+      if (pthread_create(&state.thread, NULL, completion_thread, NULL) != 0)
+         return false;
+      state.thread_started = true;
+   }
+   while (state.submitted - state.finished >= in_flight
+          || state.queue_count == MAX_QUEUED)
+      pthread_cond_wait(&state.changed, &state.lock);
+   return true;
+}
+
+
+int
+haiku_drm_present_view(struct pipe_context *pipe, struct pipe_resource *image,
+                       const struct haiku_glview_target *t,
+                       struct pipe_resource **scaled,
+                       void (*completed)(void *cookie), void *cookie)
+{
+   if (pipe == NULL || image == NULL || t == NULL || scaled == NULL
+       || image->target != PIPE_TEXTURE_2D || t->rect_count == 0
+       || t->rect_count > HAIKU_GLVIEW_MAX_RECTS
+       || t->front_bytes_per_row == 0)
+      return -1;
+
+   struct pipe_screen *screen = image->screen;
+   pthread_mutex_lock(&state.lock);
+   if (!start_present_locked(screen, 2)) {
+      pthread_mutex_unlock(&state.lock);
+      return -1;
+   }
+   if (!acquire_scanout(screen, t->front_bytes_per_row)) {
+      pthread_mutex_unlock(&state.lock);
+      return -3;
+   }
+
+   /* On a desktop drawn at 175 % or 200 % the view covers more of the
+    * screen than its frame has pixels: the GPU enlarges the frame first, as
+    * the window system would have done on the processor, filtered unless
+    * the scale is a whole number so that lines stay even. */
+   struct pipe_resource *source = image;
+   const unsigned dest_width = t->dest_width ? t->dest_width : image->width0;
+   const unsigned dest_height = t->dest_height ? t->dest_height : image->height0;
+   if (dest_width != image->width0 || dest_height != image->height0) {
+      if (*scaled != NULL && ((*scaled)->width0 != dest_width
+                              || (*scaled)->height0 != dest_height))
+         pipe_resource_reference(scaled, NULL);
+      if (*scaled == NULL) {
+         struct pipe_resource templ;
+         memset(&templ, 0, sizeof(templ));
+         templ.target = PIPE_TEXTURE_2D;
+         templ.format = state.scanout->format;
+         templ.width0 = dest_width;
+         templ.height0 = dest_height;
+         templ.depth0 = 1;
+         templ.array_size = 1;
+         templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
+         *scaled = screen->resource_create(screen, &templ);
+         if (*scaled == NULL) {
+            pthread_mutex_unlock(&state.lock);
+            return -1;
+         }
+      }
+      struct pipe_blit_info blit;
+      memset(&blit, 0, sizeof(blit));
+      blit.src.resource = image;
+      blit.src.format = util_format_linear(image->format);
+      u_box_2d(0, 0, image->width0, image->height0, &blit.src.box);
+      blit.dst.resource = *scaled;
+      blit.dst.format = (*scaled)->format;
+      u_box_2d(0, 0, dest_width, dest_height, &blit.dst.box);
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = t->filter ? PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
+      pipe->blit(pipe, &blit);
+      source = *scaled;
+   }
+
+   struct pipe_blit_info blit;
+   memset(&blit, 0, sizeof(blit));
+   blit.src.resource = source;
+   blit.src.format = util_format_linear(source->format);
+   blit.dst.resource = state.scanout;
+   blit.dst.format = state.scanout->format;
+   blit.mask = PIPE_MASK_RGBA;
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+   const int32_t width = state.scanout->width0;
+   const int32_t height = state.scanout->height0;
+   unsigned copies = 0;
+   for (uint32_t i = 0; i < t->rect_count; i++) {
+      const int32_t *r = t->rects + i * 4;
+      int32_t left = MAX2(r[0], t->origin_x);
+      int32_t top = MAX2(r[1], t->origin_y);
+      int32_t right = MIN2(r[2] + 1, t->origin_x + (int32_t)dest_width);
+      int32_t bottom = MIN2(r[3] + 1, t->origin_y + (int32_t)dest_height);
+      left = MAX2(left, 0);
+      top = MAX2(top, 0);
+      right = MIN2(right, width);
+      bottom = MIN2(bottom, height);
+      if (right <= left || bottom <= top)
+         continue;
+      u_box_2d(left - t->origin_x, top - t->origin_y, right - left,
+               bottom - top, &blit.src.box);
+      u_box_2d(left, top, right - left, bottom - top, &blit.dst.box);
+      pipe->blit(pipe, &blit);
+      copies++;
+   }
+   if (copies == 0) {
+      pthread_mutex_unlock(&state.lock);
+      return -5;
+   }
+
+   struct pipe_fence_handle *fence = NULL;
+   pipe->flush(pipe, &fence, 0);
+   if (completed == NULL) {
+      /* Putting a frame back: done before the window system goes on. */
+      pthread_mutex_unlock(&state.lock);
+      if (fence != NULL) {
+         screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+         screen->fence_reference(screen, &fence, NULL);
+      }
+      return 0;
+   }
+
+   unsigned tail = (state.queue_head + state.queue_count) % MAX_QUEUED;
+   state.queue[tail] = (struct completion) {
+      .fence = fence,
+      .completed = completed,
+      .cookie = cookie,
    };
    state.queue_count++;
    state.submitted++;

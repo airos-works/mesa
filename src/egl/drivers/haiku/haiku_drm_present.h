@@ -51,6 +51,22 @@ struct summit_haiku_present {
 int haiku_drm_present(struct pipe_context *pipe, struct pipe_resource *image,
                       const struct summit_haiku_present *present);
 
+struct haiku_glview_target;
+
+/* A BGLView's frame (haiku_glview_present.h), into the visible rectangles
+ * of target. Where the view covers more of the screen than the frame has
+ * pixels (a desktop drawn at a higher density) the frame is first enlarged
+ * by the GPU into *scaled, the caller's, kept from frame to frame and
+ * replaced when the size changes; release it with pipe_resource_reference.
+ * completed(cookie) is called on the helper thread once the GPU has finished
+ * the copies; without it the call waits for them. Returns as
+ * haiku_drm_present(). */
+int haiku_drm_present_view(struct pipe_context *pipe,
+                           struct pipe_resource *image,
+                           const struct haiku_glview_target *target,
+                           struct pipe_resource **scaled,
+                           void (*completed)(void *cookie), void *cookie);
+
 /* Waits until every present submitted so far has finished on the GPU. */
 void haiku_drm_present_wait_idle(void);
 

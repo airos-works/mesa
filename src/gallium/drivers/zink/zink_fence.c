@@ -262,8 +262,23 @@ zink_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *pfen
    struct zink_context *ctx = zink_context(pctx);
    struct zink_tc_fence *mfence = (struct zink_tc_fence *)pfence;
 
-   if (mfence->deferred_ctx == pctx || !mfence->sem)
+   if (mfence->deferred_ctx == pctx)
       return;
+
+   if (!mfence->sem) {
+      /* A fence of another context of this screen. Every context's batches
+       * are submitted in order through the screen, so this context's next
+       * batch runs after the fenced one once that one is queued, which a
+       * synchronous flush has done before the fence exists. An asynchronous
+       * one (glFenceSync in a share group, mesa/main/syncobj.c) may not have
+       * queued it yet: wait for that, not for the GPU. Without this the other
+       * context's texture could be drawn before it was painted (Summit's GPU
+       * tiles stayed blank on NVK, summit#199).
+       */
+      uint64_t timeout = OS_TIMEOUT_INFINITE;
+      tc_fence_finish(ctx, mfence, &timeout);
+      return;
+   }
 
    mfence->deferred_ctx = pctx;
    /* this will be applied on the next submit */

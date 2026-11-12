@@ -14,6 +14,9 @@
 
 #include <kernel/image.h>
 
+#include <DirectWindow.h>
+#include <Screen.h>
+
 #include "GLRenderer.h"
 #include "GalliumContext.h"
 
@@ -65,6 +68,45 @@ private:
 			int32				fPresentCount = 0;
 			// when the window last moved or its clipping changed
 			bigtime_t			fLastPlacementChange = 0;
+
+			// The window is a BDirectWindow that was asked for
+			// B_DIRECT_DEVICE_PIXELS, and fInfo is what the window system
+			// said, in frame buffer pixels (window_bounds and clip_list are
+			// the whole window's); device_scale says what one view pixel
+			// covers. Then the view's own frame, in its window's
+			// coordinates, places it.
+			BDirectWindow*		fDirectWindow = NULL;
+			bool				fAskedForDevicePixels = false;
+			bool				fDevicePixels = false;
+			BRect				fViewFrame;
+			// The rectangles the last frame went into, for telling the window
+			// system that its own copy of them is out of date.
+			clipping_rect		fPresentedClips[HGL_MAX_SCANOUT_CLIPS];
+			uint32				fPresentedClipCount = 0;
+			bool				fPresentedClipsChanged = false;
+			bigtime_t			fLastStaleMark = 0;
+			// What LockGL and SwapBuffers asked the window system for every
+			// time, kept for a while instead.
+			screen_id			fScreenID;
+			bigtime_t			fScreenChecked = 0;
+			// A bitmap handed to the window system that it may still be
+			// drawing.
+			bool				fDrawPending = false;
+			// The thread that puts the last frame back a second time, a
+			// little after the window system said something.
+			sem_id				fRepresentSem = -1;
+			thread_id			fRepresentWorker = -1;
+			int64				fRepresentAt = 0;
+			int32				fRepresentPending = 0;
+			int32				fRepresentQuit = 0;
+
+	static	status_t			_RepresentWorker(void* data);
+			void				_Represent();
+
+			void				_UpdateScreen();
+			void				_MarkStale();
+			void				_ReadWindowSystemInfo(
+									direct_buffer_info* info);
 };
 
 #endif	// ZINKRENDERER_H

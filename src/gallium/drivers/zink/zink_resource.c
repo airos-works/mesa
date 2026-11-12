@@ -132,6 +132,17 @@ zink_resource_destroy(struct pipe_screen *pscreen,
 
    zink_resource_object_reference(screen, &res->obj, NULL);
    zink_resource_object_reference(screen, &res->scanout_obj, NULL);
+   if (res->dt != NULL && screen->winsys != NULL) {
+      /* A frame may have been copied into it by the GPU, which then holds the
+       * memory; that has to end before the memory does. */
+      void *map = screen->winsys->displaytarget_map(screen->winsys, res->dt, 0);
+      if (map != NULL) {
+         zink_screen_forget_present_import(screen, map);
+         screen->winsys->displaytarget_unmap(screen->winsys, res->dt);
+      }
+      screen->winsys->displaytarget_destroy(screen->winsys, res->dt);
+      res->dt = NULL;
+   }
    threaded_resource_deinit(pres);
    FREE_CL(res);
 }

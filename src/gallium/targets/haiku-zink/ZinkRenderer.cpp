@@ -16,8 +16,12 @@
 #include <interface/DirectWindowPrivate.h>
 #include <interface/ColorConversion.h>
 #include <GraphicsDefs.h>
+#include <GLView.h>
 #include <Screen.h>
+#include <Window.h>
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/time.h>
 #include <new>
 
@@ -33,6 +37,50 @@
 
 
 extern const char* color_space_name(color_space space);
+
+
+// BGLView keeps what the window system last said about a direct window, and
+// hands the renderer a copy cut down to the view. On a desktop drawn at a
+// higher density, with B_DIRECT_DEVICE_PIXELS, the window system speaks in
+// frame buffer pixels while the view's frame is in its own, and the cut is
+// made with the two mixed up: a quarter of the view at 200 %, in the wrong
+// place. The renderer reads the original instead, from BGLView's
+// glview_direct_info (GLView.cpp of the same Mesa), and cuts it itself.
+//
+// The member is private; explicit instantiation of a template is allowed to
+// name it, which is how its offset is had without a copy of the layout.
+struct glview_direct_info;
+
+namespace {
+
+struct GLViewDirectInfo {
+	direct_buffer_info* direct_info;
+	bool direct_connected;
+	bool enable_direct_mode;
+};
+
+template<typename Tag, typename Tag::type Member>
+struct PrivateMember {
+	friend typename Tag::type Get(Tag) { return Member; }
+};
+
+struct GLViewClipInfo {
+	typedef glview_direct_info* BGLView::* type;
+	friend type Get(GLViewClipInfo);
+};
+
+template struct PrivateMember<GLViewClipInfo, &BGLView::fClipInfo>;
+
+}	// namespace
+
+
+static direct_buffer_info*
+window_system_info(BGLView* view)
+{
+	const GLViewDirectInfo* info
+		= (const GLViewDirectInfo*)(view->*Get(GLViewClipInfo()));
+	return info != NULL ? info->direct_info : NULL;
+}
 
 
 extern "C" _EXPORT BGLRenderer*
@@ -149,6 +197,7 @@ ZinkRenderer::ZinkRenderer(BGLView *view, ulong options)
 		difftime(end, beg));
 
 	BRect b = view->Bounds();
+	fScreenID = B_MAIN_SCREEN_ID;
 	fColorSpace = BScreen(view->Window()).ColorSpace();
 	TRACE("%s: Colorspace:\t%s\n", __func__, color_space_name(fColorSpace));
 
@@ -176,8 +225,71 @@ ZinkRenderer::~ZinkRenderer()
 {
 	CALLED();
 
+	if (fRepresentWorker >= 0) {
+		atomic_set(&fRepresentQuit, 1);
+		release_sem(fRepresentSem);
+		status_t result;
+		wait_for_thread(fRepresentWorker, &result);
+	}
+	if (fRepresentSem >= 0)
+		delete_sem(fRepresentSem);
+
 	if (fContextObj)
 		delete fContextObj;
+}
+
+
+// Putting the last frame back right when the window system says the window was
+// uncovered is not enough: the window system then repaints what it exposed
+// itself (the view's colour) and copies that to the screen at the next blank,
+// over the frame. So it is done once more a little later, from this thread, by
+// which time that copy has happened.
+static const bigtime_t kRepresentAgainAfter = 50000;
+
+// Set on a thread while it puts the last frame back (ScanoutTarget then skips
+// the wait after a move).
+static __thread bool sRepresenting;
+
+
+/*static*/ status_t
+ZinkRenderer::_RepresentWorker(void* data)
+{
+	ZinkRenderer* self = (ZinkRenderer*)data;
+	while (acquire_sem(self->fRepresentSem) == B_OK) {
+		if (atomic_get(&self->fRepresentQuit) != 0)
+			break;
+		bigtime_t at;
+		while ((at = atomic_get64(&self->fRepresentAt)) > system_time())
+			snooze_until(at, B_SYSTEM_TIMEBASE);
+		atomic_set(&self->fRepresentPending, 0);
+		if (atomic_get(&self->fRepresentQuit) != 0)
+			break;
+		self->_Represent();
+	}
+	return B_OK;
+}
+
+
+// Puts the last frame back into the screen, when it went there and the
+// application has stopped drawing (zink_represent_into_scanout decides that).
+void
+ZinkRenderer::_Represent()
+{
+	if (!fPresentedIntoScanout)
+		return;
+	sRepresenting = true;
+	fContextObj->Draw(fContextID, BRect());
+	sRepresenting = false;
+	// The present back went through ScanoutTarget, which holds the placement
+	// until told what happened.
+	if (fScanoutTargetHeld && fInfoLocker.LockingThread() == find_thread(NULL)) {
+		const bool markStale = fDevicePixels && fInfo != NULL
+			&& fInfo->drawing_bits_area >= 0;
+		fPresentedClipsChanged = true;
+		ReleaseScanoutTarget();
+		if (markStale)
+			_MarkStale();
+	}
 }
 
 
@@ -187,17 +299,19 @@ ZinkRenderer::LockGL()
 //	CALLED();
 	BGLRenderer::LockGL();
 
-	color_space cs = BScreen(GLView()->Window()).ColorSpace();
+	_UpdateScreen();
 
 	{
 		BAutolock lock(fInfoLocker);
-		if (fDirectModeEnabled && fInfo != NULL) {
+		// A direct window cut down to the view by BGLView has the view's
+		// size; one in frame buffer pixels has its size on the screen, and
+		// the frame keeps the view's (FrameResized).
+		if (fDirectModeEnabled && fInfo != NULL && !fDevicePixels) {
 			fWidth = fInfo->window_bounds.right - fInfo->window_bounds.left;
 			fHeight = fInfo->window_bounds.bottom - fInfo->window_bounds.top;
 		}
 
 		fContextObj->Validate(fWidth, fHeight);
-		fColorSpace = cs;
 	}
 
 	// do not hold fInfoLocker here to avoid deadlock
@@ -214,6 +328,25 @@ ZinkRenderer::UnlockGL()
 	}
 	fContextObj->SetCurrentContext(false, fContextID);
 	BGLRenderer::UnlockGL();
+}
+
+
+// Which screen the window is on and how it is set up, asked of the window
+// system once a second rather than twice a frame: both were synchronous round
+// trips, in LockGL and SwapBuffers.
+void
+ZinkRenderer::_UpdateScreen()
+{
+	const bigtime_t now = system_time();
+	if (fScreenChecked != 0 && now - fScreenChecked < 1000000)
+		return;
+	fScreenChecked = now;
+
+	BScreen screen(GLView()->Window());
+	if (!screen.IsValid())
+		return;
+	fScreenID = screen.ID();
+	fColorSpace = screen.ColorSpace();
 }
 
 
@@ -273,21 +406,83 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 	// bitmap instead is slower and has no such trouble, so that is what a
 	// moving window gets. Only while it is moving - a window is still almost
 	// all of the time.
-	if (system_time() - fLastPlacementChange < kSettleAfterMove)
+	//
+	// Putting the last frame back after the window system said something
+	// (DirectConnected) is not that: the window system waits for it, and it
+	// happens once.
+	if (!sRepresenting
+		&& system_time() - fLastPlacementChange < kSettleAfterMove)
 		return false;
 
-	failed.ok = true;
-	target->origin_x = fInfo->window_bounds.left;
-	target->origin_y = fInfo->window_bounds.top;
 	target->bits = fInfo->bits;
 	target->bytes_per_row = fInfo->bytes_per_row;
-	target->num_clips = fInfo->clip_list_count;
-	for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
-		target->clips[i].left = fInfo->clip_list[i].left;
-		target->clips[i].top = fInfo->clip_list[i].top;
-		target->clips[i].right = fInfo->clip_list[i].right;
-		target->clips[i].bottom = fInfo->clip_list[i].bottom;
+	target->dest_width = 0;
+	target->dest_height = 0;
+	target->filter = false;
+
+	if (!fDevicePixels) {
+		target->origin_x = fInfo->window_bounds.left;
+		target->origin_y = fInfo->window_bounds.top;
+		target->num_clips = fInfo->clip_list_count;
+		for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
+			target->clips[i].left = fInfo->clip_list[i].left;
+			target->clips[i].top = fInfo->clip_list[i].top;
+			target->clips[i].right = fInfo->clip_list[i].right;
+			target->clips[i].bottom = fInfo->clip_list[i].bottom;
+		}
+	} else {
+		// The window system's own words, in frame buffer pixels: the view
+		// covers this much of the screen, the way the window system
+		// enlarges anything drawn in the window (DirectWindowInfo.cpp).
+		const float scale = fInfo->device_scale > 100
+			? fInfo->device_scale / 100.0f : 1.0f;
+		const int32 left = fInfo->window_bounds.left
+			+ (int32)floorf(fViewFrame.left * scale);
+		const int32 top = fInfo->window_bounds.top
+			+ (int32)floorf(fViewFrame.top * scale);
+		const int32 right = fInfo->window_bounds.left
+			+ (int32)floorf((fViewFrame.right + 1) * scale) - 1;
+		const int32 bottom = fInfo->window_bounds.top
+			+ (int32)floorf((fViewFrame.bottom + 1) * scale) - 1;
+		if (right < left || bottom < top)
+			return false;
+		target->origin_x = left;
+		target->origin_y = top;
+		target->dest_width = right - left + 1;
+		target->dest_height = bottom - top + 1;
+		target->filter = (fInfo->device_scale % 100) != 0;
+
+		uint32 count = 0;
+		for (uint32 i = 0; i < fInfo->clip_list_count; i++) {
+			const clipping_rect& clip = fInfo->clip_list[i];
+			const int32 l = max_c(clip.left, left);
+			const int32 t = max_c(clip.top, top);
+			const int32 r = min_c(clip.right, right);
+			const int32 b = min_c(clip.bottom, bottom);
+			if (r < l || b < t)
+				continue;
+			if (count == HGL_MAX_SCANOUT_CLIPS)
+				return false;
+			target->clips[count].left = l;
+			target->clips[count].top = t;
+			target->clips[count].right = r;
+			target->clips[count].bottom = b;
+			count++;
+		}
+		if (count == 0)
+			return false;
+		target->num_clips = count;
+
+		// for the window system, once the frame is there
+		fPresentedClipsChanged = fPresentedClipsChanged
+			|| count != fPresentedClipCount
+			|| memcmp(fPresentedClips, target->clips,
+				sizeof(clipping_rect) * count) != 0;
+		memcpy(fPresentedClips, target->clips, sizeof(clipping_rect) * count);
+		fPresentedClipCount = count;
 	}
+
+	failed.ok = true;
 	return true;
 }
 
@@ -295,7 +490,8 @@ ZinkRenderer::ScanoutTarget(struct hgl_scanout_target *target)
 void
 ZinkRenderer::ReleaseScanoutTarget()
 {
-	if (fScanoutTargetHeld) {
+	if (fScanoutTargetHeld
+		&& fInfoLocker.LockingThread() == find_thread(NULL)) {
 		fScanoutTargetHeld = false;
 		fInfoLocker.Unlock();
 	}
@@ -308,7 +504,41 @@ ZinkRenderer::PresentedIntoScanout(bool presented)
 	fPresentedIntoScanout = presented;
 	if (presented)
 		fPresentCount++;
+	const bool markStale = presented && fDevicePixels && fInfo != NULL
+		&& fInfo->drawing_bits_area >= 0;
 	ReleaseScanoutTarget();
+	if (markStale)
+		_MarkStale();
+}
+
+
+// The window system draws into a copy of the screen of its own and copies
+// that to the frame buffer; the frame went into the frame buffer only. Told
+// so, it takes those pixels from the frame buffer when it moves the window
+// or reads the screen, instead of showing what its copy has there.
+//
+// It is told once a display frame, or at once when the window's visible
+// parts changed. Never wait for the window here: its thread may be waiting
+// for this one (a view's FrameResized locking the GL context, say).
+void
+ZinkRenderer::_MarkStale()
+{
+	const bigtime_t now = system_time();
+	if (!fPresentedClipsChanged && now - fLastStaleMark < 16000)
+		return;
+	if (fDirectWindow == NULL || fDirectWindow->LockWithTimeout(0) != B_OK)
+		return;
+	clipping_rect clips[HGL_MAX_SCANOUT_CLIPS];
+	uint32 count;
+	{
+		BAutolock lock(fInfoLocker);
+		count = fPresentedClipCount;
+		memcpy(clips, fPresentedClips, sizeof(clipping_rect) * count);
+		fPresentedClipsChanged = false;
+	}
+	fDirectWindow->MarkDrawingBitsStale(clips, count);
+	fDirectWindow->Unlock();
+	fLastStaleMark = now;
 }
 
 
@@ -325,7 +555,18 @@ ZinkRenderer::Display(BBitmap *bitmap, BRect *updateRect)
 	if (!fDirectModeEnabled) {
 		// TODO: avoid timeout
 		if (GLView()->LockLooperWithTimeout(1000) == B_OK) {
-			GLView()->DrawBitmap(bitmap, B_ORIGIN);
+			// The window system copies the bitmap into the screen (enlarged
+			// on a desktop drawn at a higher density) while this thread goes
+			// on to the next frame, instead of the two taking turns. The
+			// renderer has two bitmaps and the next frame goes into the
+			// other one; it is waited for here, before this one is handed
+			// over, so that the next frame is never copied into a bitmap
+			// still being drawn.
+			if (fDrawPending)
+				GLView()->Sync();
+			GLView()->DrawBitmapAsync(bitmap, B_ORIGIN);
+			GLView()->Flush();
+			fDrawPending = true;
 			GLView()->UnlockLooper();
 		}
 	} else {
@@ -348,8 +589,6 @@ ZinkRenderer::Display(BBitmap *bitmap, BRect *updateRect)
 void
 ZinkRenderer::SwapBuffers(bool vsync)
 {
-	BScreen screen(GLView()->Window());
-
 	// When the frame goes into the screen itself, wait for the display to
 	// finish the frame it is showing before starting to overwrite it. The copy
 	// takes about a millisecond for a whole screen and the display takes
@@ -365,13 +604,13 @@ ZinkRenderer::SwapBuffers(bool vsync)
 	const bool wait = fPresentedIntoScanout
 		&& (vsync || getenv("HGL_VSYNC") != NULL);
 	if (wait)
-		screen.WaitForRetrace(kRetraceTimeout);
+		BScreen(fScreenID).WaitForRetrace(kRetraceTimeout);
 
 	fContextObj->SwapBuffers(fContextID);
 	fContextObj->Validate(fWidth, fHeight);
 
 	if (vsync && !wait)
-		screen.WaitForRetrace(kRetraceTimeout);
+		BScreen(fScreenID).WaitForRetrace(kRetraceTimeout);
 }
 
 void
@@ -426,7 +665,7 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 				fInfo = (direct_buffer_info *)calloc(1,
 					DIRECT_BUFFER_INFO_AREA_SIZE);
 			}
-			memcpy(fInfo, info, DIRECT_BUFFER_INFO_AREA_SIZE);
+			_ReadWindowSystemInfo(info);
 			if ((info->buffer_state
 					& (B_BUFFER_MOVED | B_BUFFER_RESIZED | B_CLIPPING_MODIFIED))
 					!= 0) {
@@ -462,8 +701,53 @@ ZinkRenderer::DirectConnected(direct_buffer_info *info)
 			fPresentCount);
 		fPresentCount = 0;
 	}
-	if (repaint)
-		fContextObj->Draw(fContextID, BRect());
+	if (repaint) {
+		_Represent();
+
+		// and again once the window system's own repaint is on the screen
+		if (fRepresentSem < 0) {
+			fRepresentSem = create_sem(0, "zink represent");
+			if (fRepresentSem >= 0) {
+				fRepresentWorker = spawn_thread(_RepresentWorker,
+					"zink represent", B_DISPLAY_PRIORITY, this);
+				if (fRepresentWorker >= 0)
+					resume_thread(fRepresentWorker);
+			}
+		}
+		if (fRepresentWorker >= 0) {
+			atomic_set64(&fRepresentAt, system_time() + kRepresentAgainAfter);
+			if (atomic_get_and_set(&fRepresentPending, 1) == 0)
+				release_sem_etc(fRepresentSem, 1, B_DO_NOT_RESCHEDULE);
+		}
+	}
+}
+
+
+// What DirectConnected was given, or the window system's original of it
+// when that is in frame buffer pixels (see window_system_info). fInfoLocker
+// is held.
+void
+ZinkRenderer::_ReadWindowSystemInfo(direct_buffer_info* info)
+{
+	const direct_buffer_info* original = window_system_info(GLView());
+	// The same announcement, as far as can be told: BGLView copies it before
+	// it calls the renderer.
+	if (original != NULL && original->device_scale != 0
+		&& original->bits == info->bits
+		&& original->bytes_per_row == info->bytes_per_row
+		&& original->device_scale == info->device_scale
+		&& original->buffer_state == info->buffer_state) {
+		memcpy(fInfo, original, DIRECT_BUFFER_INFO_AREA_SIZE);
+		fDevicePixels = true;
+		return;
+	}
+	memcpy(fInfo, info, DIRECT_BUFFER_INFO_AREA_SIZE);
+	fDevicePixels = false;
+	if (info->device_scale > 100) {
+		// Frame buffer pixels that cannot be placed: nothing goes into the
+		// screen (ScanoutTarget sees no clipping).
+		fInfo->clip_list_count = 0;
+	}
 }
 
 
@@ -472,7 +756,33 @@ ZinkRenderer::FrameResized(float width, float height)
 {
 	TRACE("%s: %f x %f\n", __func__, width, height);
 
-	BAutolock lock(fInfoLocker);
-	fWidth = (GLuint)width;
-	fHeight = (GLuint)height;
+	// The window is locked: BGLView calls this from AttachedToWindow and
+	// FrameResized.
+	BView* view = GLView();
+	BRect frame = view->Bounds();
+	for (BView* parent = view; parent != NULL; parent = parent->Parent())
+		parent->ConvertToParent(&frame);
+
+	{
+		BAutolock lock(fInfoLocker);
+		fWidth = (GLuint)width;
+		fHeight = (GLuint)height;
+		fViewFrame = frame;
+	}
+
+	// A direct window on a desktop drawn at a higher density is left
+	// unconnected - nothing would go into the screen - unless it asks for
+	// the frame buffer's own pixels. The frame is then enlarged on the GPU
+	// (zink_screen.c). Asked once, outside fInfoLocker: the window system
+	// connects the window again before SetFlags returns, which comes back
+	// here through DirectConnected on another thread.
+	BDirectWindow* window = dynamic_cast<BDirectWindow*>(view->Window());
+	if (window != NULL && !fAskedForDevicePixels) {
+		fAskedForDevicePixels = true;
+		fDirectWindow = window;
+		if (getenv("HGL_NO_DEVICE_PIXELS") == NULL
+			&& (window->Flags() & B_DIRECT_DEVICE_PIXELS) == 0) {
+			window->SetFlags(window->Flags() | B_DIRECT_DEVICE_PIXELS);
+		}
+	}
 }

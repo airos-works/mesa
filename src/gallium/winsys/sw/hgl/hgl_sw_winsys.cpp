@@ -42,6 +42,11 @@
 #include <Bitmap.h>
 #include <OS.h>
 
+#include <new>
+#include <string.h>
+
+#include "c11/threads.h"
+
 #ifdef DEBUG
 #   define TRACE(x...) printf("hgl:winsys: " x)
 #   define CALLED() TRACE("CALLED: %s\n", __PRETTY_FUNCTION__)
@@ -65,7 +70,19 @@ struct haiku_displaytarget
 
 	void* data;
 	BBitmap* bitmap;
+	// The memory behind the bitmap, when it has an area of its own.
+	area_id area;
 };
+
+
+// Display targets are freed a little after the renderer lets go of them. A
+// window's thread may still be showing the last frame of one (a redraw while
+// the application resizes), and it holds no reference the renderer knows of;
+// two resizes later nobody is.
+#define HGL_DEAD_TARGETS 4
+static mtx_t sDeadTargetsLock = _MTX_INITIALIZER_NP;
+static struct haiku_displaytarget* sDeadTargets[HGL_DEAD_TARGETS];
+static int sDeadTargetCount;
 
 
 // Cast
@@ -128,15 +145,45 @@ hgl_winsys_displaytarget_create(struct sw_winsys* winsys,
 	haikuDisplayTarget->stride = align(formatStride, alignment);
 	haikuDisplayTarget->size = haikuDisplayTarget->stride * blockSize;
 
+	haikuDisplayTarget->area = -1;
 	if (textureUsage & PIPE_BIND_DISPLAY_TARGET) {
 		haikuDisplayTarget->data = NULL;
+		// Each display target gets an area of its own, so that its pixels
+		// start on a page: a GPU can then be given the memory and copy the
+		// frame into it (zink's present into host memory). The window
+		// system's own allocator packs bitmaps one after another, so all but
+		// the first of a window's two buffers started part way into a page
+		// unless the frame happened to be a whole number of pages, and those
+		// frames were read back and copied by the processor instead.
+		//
 		// Ask for the rows to be as long as the stride we report, so that a
 		// driver copying into the mapped bitmap with that stride stays inside
-		// it, and then report what the bitmap actually settled on.
-		haikuDisplayTarget->bitmap = new BBitmap(
-			BRect(0, 0, width - 1, height - 1), 0,
-			haikuDisplayTarget->colorSpace,
-			haikuDisplayTarget->stride);
+		// it.
+		const BRect bounds(0, 0, width - 1, height - 1);
+		void* address = NULL;
+		area_id area = create_area("hgl display target", &address,
+			B_ANY_ADDRESS,
+			align((size_t)haikuDisplayTarget->size, B_PAGE_SIZE),
+			B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
+		if (area >= 0) {
+			BBitmap* bitmap = new(std::nothrow) BBitmap(area, 0, bounds, 0,
+				haikuDisplayTarget->colorSpace, haikuDisplayTarget->stride);
+			if (bitmap != NULL && bitmap->InitCheck() == B_OK
+				&& bitmap->BytesPerRow() == (int32)haikuDisplayTarget->stride) {
+				haikuDisplayTarget->bitmap = bitmap;
+				haikuDisplayTarget->area = area;
+			} else {
+				delete bitmap;
+				delete_area(area);
+			}
+		}
+		if (haikuDisplayTarget->bitmap == NULL) {
+			// The window system's own memory, then; then report what the
+			// bitmap actually settled on.
+			haikuDisplayTarget->bitmap = new BBitmap(bounds, 0,
+				haikuDisplayTarget->colorSpace,
+				haikuDisplayTarget->stride);
+		}
 		haikuDisplayTarget->stride = haikuDisplayTarget->bitmap->BytesPerRow();
 		haikuDisplayTarget->size = haikuDisplayTarget->stride * blockSize;
 	} else {
@@ -163,11 +210,32 @@ hgl_winsys_displaytarget_destroy(struct sw_winsys* winsys,
 	if (!haikuDisplayTarget)
 		return;
 
+	if (haikuDisplayTarget->bitmap != NULL) {
+		// Kept for a while (see sDeadTargets); the oldest one goes now.
+		mtx_lock(&sDeadTargetsLock);
+		struct haiku_displaytarget* oldest = NULL;
+		if (sDeadTargetCount == HGL_DEAD_TARGETS) {
+			oldest = sDeadTargets[0];
+			memmove(&sDeadTargets[0], &sDeadTargets[1],
+				sizeof(sDeadTargets[0]) * (HGL_DEAD_TARGETS - 1));
+			sDeadTargetCount--;
+		}
+		sDeadTargets[sDeadTargetCount++] = haikuDisplayTarget;
+		mtx_unlock(&sDeadTargetsLock);
+		haikuDisplayTarget = oldest;
+		if (haikuDisplayTarget == NULL)
+			return;
+	}
+
 	if (haikuDisplayTarget->data != NULL)
 		align_free(haikuDisplayTarget->data);
 
 	if (haikuDisplayTarget->bitmap != NULL)
 		delete haikuDisplayTarget->bitmap;
+	// The bitmap does not own an area it was given; the window system keeps
+	// its own clone of it for as long as it still needs the pixels.
+	if (haikuDisplayTarget->area >= 0)
+		delete_area(haikuDisplayTarget->area);
 
 	FREE(haikuDisplayTarget);
 }

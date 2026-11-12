@@ -45,6 +45,14 @@ struct hgl_scanout_target {
 	// one, and its address is how a renderer holding the old one finds out.
 	void *bits;
 	uint32_t bytes_per_row;
+	// The size the frame covers on the screen, in frame buffer pixels. On a
+	// desktop drawn at a higher density (a window with B_DIRECT_DEVICE_PIXELS)
+	// that is larger than the frame, which is then enlarged on the way, with
+	// filtering where the scale is not a whole number. 0 means the frame's own
+	// size.
+	uint32_t dest_width;
+	uint32_t dest_height;
+	bool filter;
 	uint32_t num_clips;
 	struct {
 		// screen coordinates, the right and bottom edges included

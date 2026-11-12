@@ -212,8 +212,26 @@ struct zink_screen {
       VkCommandBuffer cmdbuf;
       VkFence fence;
       int64_t last_present_ns;
+
+      /* A window on a desktop drawn at a higher density covers more of the
+       * frame buffer than its frame has pixels: the frame is enlarged into
+       * this image by the GPU first, and the visible parts copied from here.
+       * It still holds the last such frame for putting it back.
+       */
+      VkImage scaled_image;
+      VkDeviceMemory scaled_memory;
+      VkFormat scaled_format;
+      VkImageLayout scaled_layout;
+      uint32_t scaled_width;
+      uint32_t scaled_height;
+      bool last_scaled;   /* whether the last present went through it */
    } scanout;
 };
+
+/* The memory the window system gave us for a frame is going away: let go of
+ * the GPU's hold on it first. */
+void
+zink_screen_forget_present_import(struct zink_screen *screen, void *map);
 
 
 /* update last_finished to account for batch_id wrapping */

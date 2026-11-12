@@ -1225,6 +1225,12 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       screen->scanout.buffer = VK_NULL_HANDLE;
       screen->scanout.memory = VK_NULL_HANDLE;
    }
+   if (screen->scanout.scaled_image != VK_NULL_HANDLE) {
+      VKSCR(DestroyImage)(screen->dev, screen->scanout.scaled_image, NULL);
+      VKSCR(FreeMemory)(screen->dev, screen->scanout.scaled_memory, NULL);
+      screen->scanout.scaled_image = VK_NULL_HANDLE;
+      screen->scanout.scaled_memory = VK_NULL_HANDLE;
+   }
 #endif
    for (unsigned i = 0; i < ARRAY_SIZE(screen->present_imports); i++) {
       if (screen->present_imports[i].buffer != VK_NULL_HANDLE) {
@@ -1497,6 +1503,24 @@ present_into_host_memory(struct zink_screen *screen, struct zink_context *ctx,
 }
 
 
+void
+zink_screen_forget_present_import(struct zink_screen *screen, void *map)
+{
+   /* Every copy into it was waited for when it was presented. */
+   for (unsigned i = 0; i < ARRAY_SIZE(screen->present_imports); i++) {
+      if (screen->present_imports[i].map != map ||
+          screen->present_imports[i].buffer == VK_NULL_HANDLE)
+         continue;
+      VKSCR(DestroyBuffer)(screen->dev, screen->present_imports[i].buffer, NULL);
+      VKSCR(FreeMemory)(screen->dev, screen->present_imports[i].memory, NULL);
+      screen->present_imports[i].buffer = VK_NULL_HANDLE;
+      screen->present_imports[i].memory = VK_NULL_HANDLE;
+      screen->present_imports[i].map = NULL;
+      screen->present_imports[i].size = 0;
+   }
+}
+
+
 #ifdef __HAIKU__
 static bool acquire_scanout_locked(struct zink_screen *screen,
                                    const struct hgl_scanout_target *target);
@@ -1625,17 +1649,16 @@ acquire_scanout_locked(struct zink_screen *screen,
 }
 
 // Turn the rectangles the window can be seen through into copies from the
-// frame into the screen, in screen coordinates and clipped to both.
+// frame into the screen, in screen coordinates and clipped to both. The source
+// is width x height texels: the frame itself, or the frame enlarged to the
+// size it covers on the screen.
 static unsigned
-scanout_regions(struct zink_screen *screen, struct zink_resource *res,
-                struct pipe_resource *pres, unsigned level, unsigned layer,
+scanout_regions(struct zink_screen *screen, VkImageAspectFlags aspect,
+                unsigned blocksize, unsigned width, unsigned height,
+                unsigned level, unsigned layer,
                 const struct hgl_scanout_target *target,
                 VkBufferImageCopy *regions)
 {
-   const unsigned blocksize = util_format_get_blocksize(pres->format);
-   const unsigned width = u_minify(pres->width0, level);
-   const unsigned height = u_minify(pres->height0, level);
-
    unsigned count = 0;
    for (uint32_t i = 0; i < target->num_clips; i++) {
       /* The clip list is in screen coordinates and includes both edges. */
@@ -1664,7 +1687,7 @@ scanout_regions(struct zink_screen *screen, struct zink_resource *res,
          .bufferRowLength = screen->scanout.row_pitch / blocksize,
          .bufferImageHeight = bottom - top,
          .imageSubresource = {
-            .aspectMask = res->aspect,
+            .aspectMask = aspect,
             .mipLevel = level,
             .baseArrayLayer = layer,
             .layerCount = 1,
@@ -1678,6 +1701,116 @@ scanout_regions(struct zink_screen *screen, struct zink_resource *res,
       };
    }
    return count;
+}
+
+/* Whether the frame has to be enlarged to the size it covers on the screen. */
+static bool
+target_scales(const struct hgl_scanout_target *target, unsigned width,
+              unsigned height)
+{
+   return target->dest_width != 0 && target->dest_height != 0 &&
+          (target->dest_width != width || target->dest_height != height);
+}
+
+/* An image in video memory of the size the window covers on the screen, for
+ * the enlarged frame; kept from frame to frame, replaced when the size
+ * changes.
+ */
+static bool
+acquire_scaled_image(struct zink_screen *screen, VkFormat format,
+                     uint32_t width, uint32_t height)
+{
+   if (screen->scanout.scaled_image != VK_NULL_HANDLE &&
+       screen->scanout.scaled_width == width &&
+       screen->scanout.scaled_height == height &&
+       screen->scanout.scaled_format == format)
+      return true;
+
+   /* Nothing still uses the old one: every present waits for its copies. */
+   simple_mtx_lock(&screen->scanout.represent_lock);
+   if (screen->scanout.scaled_image != VK_NULL_HANDLE) {
+      VKSCR(DestroyImage)(screen->dev, screen->scanout.scaled_image, NULL);
+      VKSCR(FreeMemory)(screen->dev, screen->scanout.scaled_memory, NULL);
+      screen->scanout.scaled_image = VK_NULL_HANDLE;
+      screen->scanout.scaled_memory = VK_NULL_HANDLE;
+      screen->scanout.scaled_width = 0;
+      screen->scanout.scaled_height = 0;
+   }
+   screen->scanout.last_scaled = false;
+   simple_mtx_unlock(&screen->scanout.represent_lock);
+
+   VkImageCreateInfo ici = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = format,
+      .extent = { width, height, 1 },
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+   VkImage image;
+   if (VKSCR(CreateImage)(screen->dev, &ici, NULL, &image) != VK_SUCCESS)
+      return false;
+
+   VkMemoryRequirements reqs;
+   VKSCR(GetImageMemoryRequirements)(screen->dev, image, &reqs);
+   uint32_t type = UINT32_MAX;
+   for (uint32_t i = 0; i < screen->info.mem_props.memoryTypeCount; i++) {
+      if ((reqs.memoryTypeBits & (1u << i)) &&
+          (screen->info.mem_props.memoryTypes[i].propertyFlags &
+           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+         type = i;
+         break;
+      }
+   }
+   VkDeviceMemory memory = VK_NULL_HANDLE;
+   VkMemoryAllocateInfo mai = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = reqs.size,
+      .memoryTypeIndex = type,
+   };
+   if (type == UINT32_MAX ||
+       VKSCR(AllocateMemory)(screen->dev, &mai, NULL, &memory) != VK_SUCCESS ||
+       VKSCR(BindImageMemory)(screen->dev, image, memory, 0) != VK_SUCCESS) {
+      if (memory != VK_NULL_HANDLE)
+         VKSCR(FreeMemory)(screen->dev, memory, NULL);
+      VKSCR(DestroyImage)(screen->dev, image, NULL);
+      return false;
+   }
+
+   screen->scanout.scaled_image = image;
+   screen->scanout.scaled_memory = memory;
+   screen->scanout.scaled_format = format;
+   screen->scanout.scaled_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   screen->scanout.scaled_width = width;
+   screen->scanout.scaled_height = height;
+   return true;
+}
+
+static void
+scaled_image_barrier(struct zink_screen *screen, VkCommandBuffer cmdbuf,
+                     VkImageLayout layout, VkAccessFlags src_access,
+                     VkAccessFlags dst_access)
+{
+   VkImageMemoryBarrier barrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = src_access,
+      .dstAccessMask = dst_access,
+      .oldLayout = screen->scanout.scaled_layout,
+      .newLayout = layout,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = screen->scanout.scaled_image,
+      .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+   };
+   VKSCR(CmdPipelineBarrier)(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                             NULL, 1, &barrier);
+   screen->scanout.scaled_layout = layout;
 }
 
 // Put the frame on the screen where the window is, copying only the parts of
@@ -1698,9 +1831,20 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
    if (!acquire_scanout(screen, target))
       return false;
 
+   const unsigned width = u_minify(pres->width0, level);
+   const unsigned height = u_minify(pres->height0, level);
+   const bool scale = target_scales(target, width, height);
+   if (scale && !acquire_scaled_image(screen, res->format, target->dest_width,
+                                      target->dest_height))
+      return false;
+
    VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
-   const unsigned count = scanout_regions(screen, res, pres, level, layer,
-                                          target, regions);
+   const unsigned count = scale
+      ? scanout_regions(screen, VK_IMAGE_ASPECT_COLOR_BIT, blocksize,
+                        target->dest_width, target->dest_height, 0, 0, target,
+                        regions)
+      : scanout_regions(screen, res->aspect, blocksize, width, height, level,
+                        layer, target, regions);
    if (count == 0)
       return false;
 
@@ -1709,9 +1853,42 @@ present_into_scanout(struct zink_screen *screen, struct zink_context *ctx,
    zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                VK_ACCESS_TRANSFER_READ_BIT,
                                VK_PIPELINE_STAGE_TRANSFER_BIT);
-   VKCTX(CmdCopyImageToBuffer)(batch->state->cmdbuf, res->obj->image,
-                               res->layout, screen->scanout.buffer,
-                               count, regions);
+   if (scale) {
+      /* On a desktop drawn at 200 % a window covers twice the frame's width
+       * and height on the screen. The GPU enlarges the frame - as the window
+       * system would have done on the processor - and the visible parts go
+       * into the screen from there. A whole scale doubles pixels; another one
+       * is filtered, so that lines stay even.
+       */
+      VkCommandBuffer cmdbuf = batch->state->cmdbuf;
+      scaled_image_barrier(screen, cmdbuf,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           VK_ACCESS_TRANSFER_READ_BIT,
+                           VK_ACCESS_TRANSFER_WRITE_BIT);
+      VkImageBlit blit = {
+         .srcSubresource = { res->aspect, level, layer, 1 },
+         .srcOffsets = { { 0, 0, 0 }, { width, height, 1 } },
+         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .dstOffsets = { { 0, 0, 0 },
+                         { target->dest_width, target->dest_height, 1 } },
+      };
+      VKCTX(CmdBlitImage)(cmdbuf, res->obj->image, res->layout,
+                          screen->scanout.scaled_image,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                          target->filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+      scaled_image_barrier(screen, cmdbuf,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_TRANSFER_READ_BIT);
+      VKCTX(CmdCopyImageToBuffer)(cmdbuf, screen->scanout.scaled_image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  screen->scanout.buffer, count, regions);
+   } else {
+      VKCTX(CmdCopyImageToBuffer)(batch->state->cmdbuf, res->obj->image,
+                                  res->layout, screen->scanout.buffer,
+                                  count, regions);
+   }
+   screen->scanout.last_scaled = scale;
 
    /* Wait for it to have happened, not merely to have been sent.
     *
@@ -1773,15 +1950,33 @@ zink_represent_into_scanout(struct pipe_screen *pscreen,
           < ZINK_SCANOUT_IDLE_NS)
       RETURN_WHY("still drawing");
 
-   /* The application left the image where the present put it; if anything has
-    * moved it since, its context owns the image and we stay away.
+   /* The last frame, enlarged, is still in the scaled image when it went that
+    * way; otherwise the application left the image where the present put it,
+    * and if anything has moved it since, its context owns the image and we
+    * stay away.
     */
-   if (res->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-      RETURN_WHY("the image has moved");
-
+   const unsigned blocksize = util_format_get_blocksize(pres->format);
+   const bool scale = target_scales(&target, pres->width0, pres->height0);
+   VkImage source = res->obj->image;
    VkBufferImageCopy regions[HGL_MAX_SCANOUT_CLIPS];
-   const unsigned count = scanout_regions(screen, res, pres, 0, 0, &target,
-                                          regions);
+   unsigned count;
+   if (scale) {
+      if (!screen->scanout.last_scaled ||
+          screen->scanout.scaled_image == VK_NULL_HANDLE ||
+          screen->scanout.scaled_width != target.dest_width ||
+          screen->scanout.scaled_height != target.dest_height ||
+          screen->scanout.scaled_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+         RETURN_WHY("no enlarged frame of this size");
+      source = screen->scanout.scaled_image;
+      count = scanout_regions(screen, VK_IMAGE_ASPECT_COLOR_BIT, blocksize,
+                              target.dest_width, target.dest_height, 0, 0,
+                              &target, regions);
+   } else {
+      if (res->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+         RETURN_WHY("the image has moved");
+      count = scanout_regions(screen, res->aspect, blocksize, pres->width0,
+                              pres->height0, 0, 0, &target, regions);
+   }
    if (count == 0)
       RETURN_WHY("nothing visible");
 
@@ -1818,7 +2013,7 @@ zink_represent_into_scanout(struct pipe_screen *pscreen,
    VKSCR(ResetCommandBuffer)(screen->scanout.cmdbuf, 0);
    if (VKSCR(BeginCommandBuffer)(screen->scanout.cmdbuf, &cbbi) != VK_SUCCESS)
       goto out;
-   VKSCR(CmdCopyImageToBuffer)(screen->scanout.cmdbuf, res->obj->image,
+   VKSCR(CmdCopyImageToBuffer)(screen->scanout.cmdbuf, source,
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                screen->scanout.buffer, count, regions);
    if (VKSCR(EndCommandBuffer)(screen->scanout.cmdbuf) != VK_SUCCESS)

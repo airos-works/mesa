@@ -20,7 +20,7 @@ libzinkpipe = shared_library(
     libmesa, libglsl, libgallium, libgl
   ],
   dependencies : [
-    driver_zink, driver_swrast, cpp.find_library('be'),
+    driver_zink, driver_swrast, cpp.find_library('be'), cpp.find_library('game'),
     cpp.find_library('translation'), cpp.find_library('network'),
     dep_unwind, idep_mesautil, idep_nir, idep_xmlconfig,
   ],

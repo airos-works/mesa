@@ -69,6 +69,9 @@ struct wsi_device {
    VkExternalSemaphoreHandleTypeFlags timeline_semaphore_export_handle_types;
 
    bool has_import_memory_host;
+   /* Haiku: the driver could not import a wl_shm buffer for the GPU to
+    * blit into (wsi_common_wayland.c) */
+   bool wl_gpu_shm_refused;
    bool has_timeline_semaphore;
 
    /** Indicates if wsi_image_create_info::scanout is supported

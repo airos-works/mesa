@@ -1361,7 +1361,7 @@ wsi_wl_swapchain_update_colorspace(struct wsi_wl_swapchain *chain)
    wp_image_description_v1_add_listener(image_desc, &image_description_listener, &status);
 
    while (status == undefined) {
-      int ret = wl_display_dispatch_queue(display->wl_display, display->queue);
+      int ret = loader_wayland_dispatch(display->wl_display, display->queue, NULL);
       if (ret < 0)
          return VK_ERROR_OUT_OF_DATE_KHR;
    }
@@ -3023,8 +3023,8 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    /* For EXT_swapchain_maintenance1. We might have transitioned from FIFO to MAILBOX.
     * In this case we need to let the FIFO request complete, before presenting MAILBOX. */
    while (!chain->legacy_fifo_ready) {
-      int ret = wl_display_dispatch_queue(wsi_wl_surface->display->wl_display,
-                                          wsi_wl_surface->display->queue);
+      int ret = loader_wayland_dispatch(wsi_wl_surface->display->wl_display,
+                                        wsi_wl_surface->display->queue, NULL);
       if (ret < 0)
          return VK_ERROR_OUT_OF_DATE_KHR;
 
@@ -3442,12 +3442,59 @@ wsi_wl_swapchain_destroy(struct wsi_swapchain *wsi_chain,
 }
 
 static VkResult
+wsi_wl_surface_create_swapchain_shm(VkIcdSurfaceBase *icd_surface,
+                                    VkDevice device,
+                                    struct wsi_device *wsi_device,
+                                    const VkSwapchainCreateInfoKHR* pCreateInfo,
+                                    const VkAllocationCallbacks* pAllocator,
+                                    struct wsi_swapchain **swapchain_out,
+                                    bool hw_gpu_shm);
+
+/* Haiku: a hardware driver that can import host memory has the GPU blit
+ * each frame straight into the wl_shm buffer, as a software driver does,
+ * instead of into a buffer of its own that the CPU then copies (a frame's
+ * worth of memory traffic on the presenting thread). Where the driver
+ * refuses the import (amdgpu_drm takes anonymous memory only unless libdrm
+ * asks otherwise), the swapchain is made the copying way, and the device is
+ * not asked again. */
+static VkResult
 wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
                                 VkDevice device,
                                 struct wsi_device *wsi_device,
                                 const VkSwapchainCreateInfoKHR* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator,
                                 struct wsi_swapchain **swapchain_out)
+{
+#ifdef __HAIKU__
+   const bool try_gpu_shm = !wsi_device->sw && wsi_device->has_import_memory_host &&
+                            !wsi_device->wl_gpu_shm_refused &&
+                            !(WSI_DEBUG & WSI_DEBUG_NOSHM);
+   if (try_gpu_shm) {
+      VkResult result =
+         wsi_wl_surface_create_swapchain_shm(icd_surface, device, wsi_device,
+                                             pCreateInfo, pAllocator,
+                                             swapchain_out, true);
+      /* RADV reports a refused import as VK_ERROR_UNKNOWN; whatever it
+       * was, the copying way is tried, and fails again if it was not the
+       * import. */
+      if (result == VK_SUCCESS)
+         return result;
+      wsi_device->wl_gpu_shm_refused = true;
+   }
+#endif
+   return wsi_wl_surface_create_swapchain_shm(icd_surface, device, wsi_device,
+                                              pCreateInfo, pAllocator,
+                                              swapchain_out, false);
+}
+
+static VkResult
+wsi_wl_surface_create_swapchain_shm(VkIcdSurfaceBase *icd_surface,
+                                    VkDevice device,
+                                    struct wsi_device *wsi_device,
+                                    const VkSwapchainCreateInfoKHR* pCreateInfo,
+                                    const VkAllocationCallbacks* pAllocator,
+                                    struct wsi_swapchain **swapchain_out,
+                                    bool hw_gpu_shm)
 {
    struct wsi_wl_surface *wsi_wl_surface =
       wl_container_of((VkIcdSurfaceWayland *)icd_surface, wsi_wl_surface, base);
@@ -3562,7 +3609,7 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       cpu_image_params = (struct wsi_cpu_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_CPU,
       };
-      if (wsi_device->sw && wsi_device->has_import_memory_host &&
+      if ((wsi_device->sw || hw_gpu_shm) && wsi_device->has_import_memory_host &&
           !(WSI_DEBUG & WSI_DEBUG_NOSHM)) {
          buffer_type = WSI_WL_BUFFER_GPU_SHM;
          cpu_image_params.alloc_shm = wsi_wl_alloc_image_shm;

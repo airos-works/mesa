@@ -86,6 +86,12 @@ radv_init_wsi(struct radv_physical_device *pdev)
       return result;
 
    pdev->wsi_device.supports_modifiers = pdev->info.gfx_level >= GFX9;
+#ifdef __HAIKU__
+   /* amdgpu_drm wires the pages of a wl_shm buffer (a shared file mapping)
+    * for the GPU, and lets go of them when the import is freed or the team
+    * ends (libdrm airos-2.4.134 asks without ANONONLY). */
+   pdev->wsi_device.wl_gpu_shm_import = true;
+#endif
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;
 

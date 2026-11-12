@@ -3268,7 +3268,12 @@ wsi_wl_image_init(struct wsi_wl_swapchain *chain,
          wsi_wl_alloc_image_shm(&image->base, image->base.row_pitches[0] *
                                               chain->extent.height);
       }
-      assert(image->shm_ptr != NULL);
+      /* No shared memory to be had (no memfd and no temporary directory):
+       * fail, rather than hand the compositor whatever descriptor 0 is. */
+      if (image->shm_ptr == NULL) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_image;
+      }
 
       /* Share it in a wl_buffer */
       struct wl_shm_pool *pool = wl_shm_create_pool(display->wl_shm,
@@ -3450,7 +3455,9 @@ wsi_wl_surface_create_swapchain_shm(VkIcdSurfaceBase *icd_surface,
                                     struct wsi_swapchain **swapchain_out,
                                     bool hw_gpu_shm);
 
-/* Haiku: a hardware driver that can import host memory has the GPU blit
+/* Haiku: a hardware driver that can import host memory, and says the import
+ * of a wl_shm buffer is safe (wl_gpu_shm_import: RADV; nvidia_rm has hung the
+ * machine importing one), has the GPU blit
  * each frame straight into the wl_shm buffer, as a software driver does,
  * instead of into a buffer of its own that the CPU then copies (a frame's
  * worth of memory traffic on the presenting thread). Where the driver
@@ -3467,6 +3474,7 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 {
 #ifdef __HAIKU__
    const bool try_gpu_shm = !wsi_device->sw && wsi_device->has_import_memory_host &&
+                            wsi_device->wl_gpu_shm_import &&
                             !wsi_device->wl_gpu_shm_refused &&
                             !(WSI_DEBUG & WSI_DEBUG_NOSHM);
    if (try_gpu_shm) {

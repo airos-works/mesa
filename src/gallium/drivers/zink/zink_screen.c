@@ -3033,6 +3033,33 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
    return screen;
 
 fail:
+   /* A screen that could not be made (no Vulkan device: Haiku's GL kit then
+    * falls back to softpipe) must not leave anything behind that outlives its
+    * memory. The flush queue is started first thing: its thread kept waiting
+    * on a mutex and condition variable inside the freed screen, and the queue
+    * stayed on u_queue's atexit list, so the first reuse of that memory or
+    * exit() locked a destroyed mutex (the team aborted in
+    * util_queue_thread_func or in atexit_handler).
+    */
+#ifdef ENABLE_SHADER_CACHE
+   if (screen->disk_cache) {
+      util_queue_finish(&screen->cache_put_thread);
+      util_queue_finish(&screen->cache_get_thread);
+      disk_cache_wait_for_idle(screen->disk_cache);
+      util_queue_destroy(&screen->cache_put_thread);
+      util_queue_destroy(&screen->cache_get_thread);
+   }
+#endif
+   disk_cache_destroy(screen->disk_cache);
+   if (screen->threaded)
+      util_queue_destroy(&screen->flush_queue);
+   if (screen->dev)
+      VKSCR(DestroyDevice)(screen->dev, NULL);
+   if (screen->instance) {
+      if (VK_NULL_HANDLE != screen->debugUtilsCallbackHandle)
+         VKSCR(DestroyDebugUtilsMessengerEXT)(screen->instance, screen->debugUtilsCallbackHandle, NULL);
+      vkDestroyInstance(screen->instance, NULL);
+   }
    ralloc_free(screen);
    return NULL;
 }

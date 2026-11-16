@@ -81,6 +81,10 @@ _EGL_DRIVER_STANDARD_TYPECASTS(haiku_egl)
 struct haiku_egl_display {
    int ref_count;
    bool native_csf;
+   /* Zink over the software winsys: its flush_frontbuffer() shows only Kopper
+    * swap chains, which Haiku has none of, so window surfaces are presented by
+    * copying each frame into the view's bitmap (haiku_present_texture). */
+   bool zink;
    struct hgl_display *disp;
 };
 
@@ -182,7 +186,7 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    }
 
    wgl_surf->fb->update_size = update_size;
-   if (hgl_dpy->native_csf)
+   if (hgl_dpy->native_csf || hgl_dpy->zink)
       wgl_surf->fb->present = haiku_present_texture;
    update_size(wgl_surf->fb);
    wgl_surf->base.Width = wgl_surf->fb->newWidth;
@@ -494,6 +498,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
          if (!disp->Options.ForceSoftware
              && !debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false))
             screen = sw_screen_create_zink(winsys, NULL, false);
+         hgl_dpy->zink = screen != NULL;
 #endif
          if (!screen)
             screen = sw_screen_create(winsys);

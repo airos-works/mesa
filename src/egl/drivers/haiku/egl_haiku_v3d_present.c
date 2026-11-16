@@ -45,6 +45,7 @@
 #include "v3d/drm/v3d_drm_public.h"
 
 #include "egl_haiku_v3d_present.h"
+#include "haiku_glview_present.h"
 
 #define MAX_RECTS 256
 #define MAX_QUEUED 16
@@ -756,6 +757,83 @@ haiku_v3d_present(struct st_context *st, struct pipe_resource *image,
    pthread_cond_broadcast(&state.changed);
    pthread_mutex_unlock(&state.lock);
    return 0;
+}
+
+
+int
+haiku_v3d_present_view(struct st_context *st, struct pipe_resource *image,
+                       const struct haiku_glview_target *t,
+                       struct pipe_resource **scaled,
+                       void (*completed)(void *cookie), void *cookie)
+{
+   if (st == NULL || image == NULL || t == NULL || scaled == NULL
+       || image->target != PIPE_TEXTURE_2D || t->rect_count == 0
+       || t->rect_count > HAIKU_GLVIEW_MAX_RECTS
+       || t->front_bytes_per_row == 0)
+      return -1;
+   struct pipe_context *pipe = st->pipe;
+   struct pipe_screen *screen = pipe->screen;
+   if (!v3d_haiku_can_import(screen))
+      return -10;
+
+   /* On a desktop drawn at 200 % the view covers more of the screen than
+    * its frame has pixels: the GPU enlarges the frame first, as app_server
+    * would have done on the processor, filtered unless the scale is a whole
+    * number so that lines stay even. */
+   struct pipe_resource *source = image;
+   const unsigned dest_width = t->dest_width ? t->dest_width : image->width0;
+   const unsigned dest_height = t->dest_height ? t->dest_height
+                                               : image->height0;
+   if (dest_width != image->width0 || dest_height != image->height0) {
+      if (*scaled != NULL && ((*scaled)->width0 != dest_width
+                              || (*scaled)->height0 != dest_height
+                              || (*scaled)->format != image->format))
+         pipe_resource_reference(scaled, NULL);
+      if (*scaled == NULL) {
+         struct pipe_resource templ;
+         memset(&templ, 0, sizeof(templ));
+         templ.target = PIPE_TEXTURE_2D;
+         templ.format = image->format;
+         templ.width0 = dest_width;
+         templ.height0 = dest_height;
+         templ.depth0 = 1;
+         templ.array_size = 1;
+         templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
+         *scaled = screen->resource_create(screen, &templ);
+         if (*scaled == NULL)
+            return -1;
+      }
+      struct pipe_blit_info blit;
+      memset(&blit, 0, sizeof(blit));
+      blit.src.resource = image;
+      blit.src.format = util_format_linear(image->format);
+      u_box_2d(0, 0, image->width0, image->height0, &blit.src.box);
+      blit.dst.resource = *scaled;
+      blit.dst.format = util_format_linear((*scaled)->format);
+      u_box_2d(0, 0, dest_width, dest_height, &blit.dst.box);
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = t->filter ? PIPE_TEX_FILTER_LINEAR
+                              : PIPE_TEX_FILTER_NEAREST;
+      pipe->blit(pipe, &blit);
+      source = *scaled;
+   }
+
+   const struct summit_haiku_present present = {
+      .version = 1,
+      .origin_x = t->origin_x,
+      .origin_y = t->origin_y,
+      .rect_count = t->rect_count,
+      .rects = t->rects,
+      .front_bytes_per_row = t->front_bytes_per_row,
+      .frames_in_flight = 2,
+      .completed = completed,
+      .cookie = cookie,
+   };
+   int result = haiku_v3d_present(st, source, &present);
+   /* Putting a frame back: done before the window system goes on. */
+   if (result == 0 && completed == NULL)
+      haiku_v3d_present_wait_idle();
+   return result;
 }
 
 

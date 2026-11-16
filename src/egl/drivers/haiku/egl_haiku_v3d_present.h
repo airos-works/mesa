@@ -46,6 +46,21 @@ struct summit_haiku_present {
  * -5 nothing visible, -10 not a V3D that imports memory. */
 int haiku_v3d_present(struct st_context *st, struct pipe_resource *image,
                       const struct summit_haiku_present *present);
+
+struct haiku_glview_target;
+
+/* A BGLView's frame (haiku_glview_present.h) into the visible rectangles of
+ * target in rpi_display's frame buffer. Where the view covers more of the
+ * screen than the frame has pixels (a desktop drawn at a higher density) the
+ * frame is first enlarged by the GPU into *scaled, the caller's, kept from
+ * frame to frame and replaced when the size changes; release it with
+ * pipe_resource_reference. completed(cookie) is called on the helper thread
+ * once the GPU has finished the copies; without it the call waits for them.
+ * Returns as haiku_v3d_present(). */
+int haiku_v3d_present_view(struct st_context *st, struct pipe_resource *image,
+                           const struct haiku_glview_target *target,
+                           struct pipe_resource **scaled,
+                           void (*completed)(void *cookie), void *cookie);
 void haiku_v3d_present_wait_idle(void);
 /* Waits for the GPU, then lets go of both targets (of the screen's, or of
  * any for NULL). */

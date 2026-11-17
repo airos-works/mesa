@@ -17,6 +17,10 @@ struct pan_kmod_vm;
 struct pan_kmod_bo;
 struct pan_kmod_allocator;
 struct pan_kmod_dev *haiku_kmod_dev_create(int, uint32_t, const struct pan_kmod_allocator *);
+/* A BO over page-aligned memory of this team (pan_haiku_buffer_import), never
+ * CPU-mapped through the kmod: the caller has the memory mapped already. */
+struct pan_kmod_bo *haiku_kmod_bo_import_memory(struct pan_kmod_dev *,
+   struct pan_kmod_vm *exclusive_vm, void *address, uint64_t size, bool *cpu_cached);
 void *haiku_kmod_bo_mmap(struct pan_kmod_bo *, off_t, size_t, int, int, void *);
 int haiku_kmod_bo_munmap(struct pan_kmod_bo *, void *, size_t);
 int haiku_kmod_bo_attach_sync_point(struct pan_kmod_bo *, uint32_t, uint64_t, bool);

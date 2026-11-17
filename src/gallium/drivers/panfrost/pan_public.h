@@ -34,6 +34,18 @@ struct renderonly;
 
 struct pipe_screen *panfrost_haiku_screen_create(const char *device);
 
+#ifdef __HAIKU__
+#include <stdbool.h>
+#include <stddef.h>
+struct pipe_resource;
+/* Summit's direct present (haiku#71): memory of this team as a shader storage
+ * buffer, through mali_csf's kImportBuffer. See pan_resource.c. */
+bool panfrost_haiku_can_import(struct pipe_screen *screen);
+struct pipe_resource *panfrost_haiku_import_buffer(struct pipe_screen *screen,
+                                                   void *address, size_t size,
+                                                   bool *cpu_cached);
+#endif
+
 struct pipe_screen *
 panfrost_create_screen(int fd, const struct pipe_screen_config *config,
                        struct renderonly *ro);

@@ -2,3 +2,7 @@ __egl_Main
 MesaGLInteropEGLQueryDeviceInfo
 MesaGLInteropEGLExportObject
 MesaGLInteropEGLFlushObjects
+summit_haiku_present_framebuffer (optional)
+summit_haiku_present_wait_idle (optional)
+summit_haiku_present_release (optional)
+summit_haiku_present_version (optional)

@@ -48,6 +48,11 @@ int pan_haiku_client_has_cached_buffers(void)
    return (sClientCapabilities & kClientCachedBuffers) != 0;
 }
 
+int pan_haiku_client_has_imports(void)
+{
+   return (sClientCapabilities & kClientImportedBuffers) != 0;
+}
+
 int pan_haiku_check_client(int fd)
 {
    ClientInfo info{};
@@ -68,6 +73,20 @@ int pan_haiku_buffer_create(int fd, uint64_t bytes, bool cpuCached, uint32_t* ha
    BufferCreate request{kClientVersion, flags, bytes, 0, 0, 0};
    if (Call(fd, kCreateBuffer, request) != 0) return -1;
    *handle = request.handle;
+   return 0;
+}
+
+int pan_haiku_buffer_import(int fd, void* address, uint64_t bytes,
+   uint32_t* handle, bool* cpuCached)
+{
+   if (handle == NULL || address == NULL || bytes == 0
+      || ((uintptr_t(address) | bytes) & (B_PAGE_SIZE - 1)) != 0)
+      return Fail(EINVAL);
+   if (!pan_haiku_client_has_imports()) return Fail(ENOTSUP);
+   BufferImport request{kClientVersion, 0, uint64_t(uintptr_t(address)), bytes, 0, 0};
+   if (Call(fd, kImportBuffer, request) != 0) return -1;
+   *handle = request.handle;
+   if (cpuCached != NULL) *cpuCached = (request.flags & kBufferCpuCached) != 0;
    return 0;
 }
 

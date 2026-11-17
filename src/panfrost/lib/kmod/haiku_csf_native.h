@@ -63,6 +63,12 @@ struct pan_haiku_heap {
 int pan_haiku_check_client(int fd);
 int pan_haiku_buffer_create(int fd, uint64_t bytes, bool cpuCached, uint32_t *handle);
 int pan_haiku_client_has_cached_buffers(void);
+/* kImportBuffer: page-aligned memory of this team (whole pages) as a buffer
+ * the driver holds until it is destroyed and no GPU work uses it. *cpu_cached:
+ * the CPU caches that memory, and the caller keeps it coherent (dc civac). */
+int pan_haiku_client_has_imports(void);
+int pan_haiku_buffer_import(int fd, void *address, uint64_t bytes,
+   uint32_t *handle, bool *cpu_cached);
 int pan_haiku_buffer_destroy(int fd, uint32_t handle);
 int pan_haiku_buffer_map(int fd, uint32_t handle, struct pan_haiku_map *map);
 int pan_haiku_buffer_unmap(int32_t area);

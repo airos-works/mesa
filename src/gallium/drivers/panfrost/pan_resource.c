@@ -1071,6 +1071,7 @@ panfrost_can_create_resource(struct pipe_screen *screen,
 
 #if DETECT_OS_HAIKU
 #include "kmod/haiku_csf_native.h"
+#include "pan_public.h"
 static int pan_haiku_cached_staging(void);
 static void pan_haiku_sync_cpu_cache(const void *start, size_t bytes, bool invalidate);
 #endif
@@ -2712,6 +2713,66 @@ panfrost_resource_get_stencil(struct pipe_resource *prsrc)
 
    return &pan_resource(prsrc)->separate_stencil->base;
 }
+
+#if DETECT_OS_HAIKU
+/* Whether screen is Panfrost's, on a mali_csf that imports memory of this
+ * team (kImportBuffer). */
+bool
+panfrost_haiku_can_import(struct pipe_screen *screen)
+{
+   return screen && screen->resource_from_handle == panfrost_resource_from_handle
+      && pan_haiku_client_has_imports();
+}
+
+/* A PIPE_BUFFER (for shader storage) over the page-aligned memory at address
+ * in this team, size bytes (whole pages): a frame buffer or app_server's copy
+ * of the screen that Summit's direct present writes into (haiku#71). The
+ * driver holds the pages until the resource and the GPU work using it are
+ * gone. *cpu_cached: the CPU caches the memory, and the caller cleans and
+ * invalidates the lines the GPU writes, before and after. Never mapped for
+ * the CPU through the resource. NULL where the driver cannot import it. */
+struct pipe_resource *
+panfrost_haiku_import_buffer(struct pipe_screen *screen, void *address,
+                             size_t size, bool *cpu_cached)
+{
+   if (!panfrost_haiku_can_import(screen) || !size || size > UINT32_MAX
+       || ((uintptr_t)address & 4095) || (size & 4095))
+      return NULL;
+   struct panfrost_device *dev = pan_device(screen);
+   struct panfrost_resource *so = CALLOC_STRUCT(panfrost_resource);
+   if (!so)
+      return NULL;
+   so->base = (struct pipe_resource){
+      .target = PIPE_BUFFER,
+      .format = PIPE_FORMAT_R8_UINT,
+      .width0 = size,
+      .height0 = 1,
+      .depth0 = 1,
+      .array_size = 1,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_SHADER_BUFFER,
+   };
+   so->base.screen = screen;
+   pipe_reference_init(&so->base.reference, 1);
+   util_range_init(&so->valid_buffer_range);
+   so->modifier_constant = true;
+   if (!panfrost_resource_try_setup(screen, so, DRM_FORMAT_MOD_LINEAR,
+                                    so->base.format, 0)) {
+      panfrost_resource_destroy(screen, &so->base);
+      return NULL;
+   }
+   so->owns_label = false;
+   so->bo = panfrost_bo_import_haiku_memory(dev, address, size, cpu_cached);
+   if (!so->bo) {
+      panfrost_resource_destroy(screen, &so->base);
+      return NULL;
+   }
+   so->plane.base = so->bo->ptr.gpu;
+   util_range_add(&so->base, &so->valid_buffer_range, 0, size);
+   panfrost_resource_set_damage_region(screen, &so->base, 0, NULL);
+   return &so->base;
+}
+#endif
 
 static const struct u_transfer_vtbl transfer_vtbl = {
    .resource_create = panfrost_resource_create,

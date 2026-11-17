@@ -1,6 +1,10 @@
 {
 	global:
 		__egl_Main;
+		summit_haiku_present_framebuffer;
+		summit_haiku_present_wait_idle;
+		summit_haiku_present_release;
+		summit_haiku_present_version;
 		MesaGLInteropEGLQueryDeviceInfo;
 		MesaGLInteropEGLExportObject;
 		MesaGLInteropEGLFlushObjects;

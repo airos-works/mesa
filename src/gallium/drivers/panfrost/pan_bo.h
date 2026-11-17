@@ -144,6 +144,11 @@ struct panfrost_bo *panfrost_bo_create(struct panfrost_device *dev, size_t size,
                                        uint32_t flags, const char *label);
 int panfrost_bo_mmap(struct panfrost_bo *bo);
 struct panfrost_bo *panfrost_bo_import(struct panfrost_device *dev, int fd);
+#ifdef __HAIKU__
+struct panfrost_bo *panfrost_bo_import_haiku_memory(struct panfrost_device *dev,
+                                                    void *address, size_t size,
+                                                    bool *cpu_cached);
+#endif
 int panfrost_bo_export(struct panfrost_bo *bo);
 void panfrost_bo_cache_evict_all(struct panfrost_device *dev);
 

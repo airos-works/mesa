@@ -201,6 +201,40 @@ fail:
    return NULL;
 }
 
+struct pan_kmod_bo *
+haiku_kmod_bo_import_memory(struct pan_kmod_dev *dev, struct pan_kmod_vm *exclusive_vm,
+                            void *address, uint64_t size, bool *cpu_cached)
+{
+   if (!address || !size || ((uintptr_t)address & 4095) || (size & 4095)
+       || (exclusive_vm && exclusive_vm->dev != dev)) {
+      errno = EINVAL;
+      return NULL;
+   }
+   struct haiku_bo *bo = pan_kmod_dev_alloc(dev, sizeof(*bo));
+   if (!bo) { errno = ENOMEM; return NULL; }
+   bo->map.area = -1;
+   uint32_t handle;
+   bool cached = false;
+   if (pan_haiku_buffer_import(dev->fd, address, size, &handle, &cached)) goto fail;
+   if (exclusive_vm)
+      bo->sync_handle = container_of(exclusive_vm, struct haiku_vm, base)->sync_handle;
+   else if (pan_haiku_sync_create(dev->fd, 1, &bo->sync_handle)) {
+      int error = errno;
+      log_failure("buffer destroy", pan_haiku_buffer_destroy(dev->fd, handle));
+      errno = error;
+      goto fail;
+   }
+   simple_mtx_init(&bo->lock, mtx_plain);
+   pan_kmod_bo_init(&bo->base, dev, exclusive_vm, size,
+                    PAN_KMOD_BO_FLAG_NO_MMAP | PAN_KMOD_BO_FLAG_IMPORTED, handle);
+   if (cpu_cached)
+      *cpu_cached = cached;
+   return &bo->base;
+fail:
+   pan_kmod_dev_free(dev, bo);
+   return NULL;
+}
+
 static void haiku_bo_free(struct pan_kmod_bo *base)
 {
    struct haiku_bo *bo = container_of(base, struct haiku_bo, base);

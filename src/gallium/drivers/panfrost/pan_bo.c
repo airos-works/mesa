@@ -565,6 +565,55 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
 #endif
 }
 
+#ifdef __HAIKU__
+/* Memory of this team (mali_csf kImportBuffer), mapped into the device's VM:
+ * Summit's direct present writes its frames into the frame buffer and
+ * app_server's copy of the screen through such BOs (haiku#71). Shared, so it
+ * never goes into the BO cache: the last reference unmaps it from the VM and
+ * destroys the handle, and the driver lets go of the pages once no GPU work
+ * uses them any more. Never CPU-mapped here: the caller has the memory. */
+struct panfrost_bo *
+panfrost_bo_import_haiku_memory(struct panfrost_device *dev, void *address,
+                                size_t size, bool *cpu_cached)
+{
+   struct pan_kmod_bo *kmod_bo = haiku_kmod_bo_import_memory(
+      dev->kmod.dev, dev->kmod.vm, address, size, cpu_cached);
+   if (!kmod_bo)
+      return NULL;
+
+   pthread_mutex_lock(&dev->bo_map_lock);
+   struct panfrost_bo *bo = pan_lookup_bo(dev, kmod_bo->handle);
+   assert(!bo->dev);
+   bo->kmod_bo = kmod_bo;
+
+   struct pan_kmod_vm_op vm_op = {
+      .type = PAN_KMOD_VM_OP_TYPE_MAP,
+      .va = {
+         .start = PAN_KMOD_VM_MAP_AUTO_VA,
+         .size = kmod_bo->size,
+      },
+      .map = {
+         .bo = kmod_bo,
+         .bo_offset = 0,
+      },
+   };
+   if (pan_kmod_vm_bind(dev->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &vm_op, 1)) {
+      pan_kmod_bo_put(kmod_bo);
+      memset(bo, 0, sizeof(*bo));
+      pthread_mutex_unlock(&dev->bo_map_lock);
+      return NULL;
+   }
+
+   bo->ptr.gpu = vm_op.va.start;
+   bo->flags = PAN_BO_SHARED | PAN_BO_INVISIBLE;
+   bo->dev = dev;
+   bo->label = "Haiku imported memory";
+   p_atomic_set(&bo->refcnt, 1);
+   pthread_mutex_unlock(&dev->bo_map_lock);
+   return bo;
+}
+#endif
+
 int
 panfrost_bo_export(struct panfrost_bo *bo)
 {

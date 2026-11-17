@@ -1,5 +1,9 @@
 {
 	global:
+		summit_haiku_present_framebuffer;
+		summit_haiku_present_wait_idle;
+		summit_haiku_present_release;
+		summit_haiku_present_version;
 		egl*;
 		MesaGLInteropEGL*;
 	local:

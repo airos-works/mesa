@@ -26,7 +26,9 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <xf86drm.h>
+#ifndef __HAIKU__
 #include <xf86drmMode.h>
+#endif
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_hash_table.h"
@@ -154,7 +156,12 @@ vc4_bo_free(struct vc4_bo *bo)
                 } else
 #endif
                 {
+#ifndef __HAIKU__
+                        /* On Haiku the driver's mapping goes away with the
+                         * handle, below.
+                         */
                         munmap(bo->map, bo->size);
+#endif
                         VG(VALGRIND_FREELIKE_BLOCK(bo->map, 0));
                 }
         }
@@ -646,9 +653,15 @@ vc4_bo_map_unsynchronized(struct vc4_bo *bo)
                 abort();
         }
 
+#ifdef __HAIKU__
+        /* The driver has mapped the buffer; "offset" is the address. */
+        bo->map = (void *)(uintptr_t)offset;
+        if (bo->map == NULL) {
+#else
         bo->map = mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                        bo->screen->fd, offset);
         if (bo->map == MAP_FAILED) {
+#endif
                 fprintf(stderr, "mmap of bo %d (offset 0x%016llx, size %d) failed\n",
                         bo->handle, (long long)offset, bo->size);
                 abort();

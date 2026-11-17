@@ -59,11 +59,16 @@ vc4_pipe_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
                 struct pipe_screen *screen = pctx->screen;
                 int fd = -1;
 
+                /* Haiku has no sync files: the fence is the job's sequence
+                 * number.
+                 */
+#ifndef __HAIKU__
                 if (flags & PIPE_FLUSH_FENCE_FD) {
                         /* The vc4_fence takes ownership of the returned fd. */
                         drmSyncobjExportSyncFile(vc4->fd, vc4->job_syncobj,
                                                  &fd);
                 }
+#endif
 
                 struct vc4_fence *f = vc4_fence_create(vc4->screen,
                                                        vc4->last_emit_seqno,

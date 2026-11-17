@@ -57,6 +57,11 @@
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
+#ifdef GALLIUM_VC4
+extern "C" {
+#include "vc4/drm/vc4_drm_public.h"
+}
+#endif
 #ifdef GALLIUM_V3D
 extern "C" {
 #include "v3d/drm/v3d_drm_public.h"
@@ -88,6 +93,9 @@ _EGL_DRIVER_STANDARD_TYPECASTS(haiku_egl)
 struct haiku_egl_display {
    int ref_count;
    bool native_csf;
+      /* a GPU's screen: frames are presented from its textures */
+   bool v3d;
+      /* ... the V3D's (Raspberry Pi 4/5), which can present into the screen */
    struct hgl_display *disp;
 };
 
@@ -431,7 +439,7 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    mtx_init(&wgl_surf->present_lock, mtx_plain);
 #ifdef GALLIUM_V3D
    /* the V3D copies into rpi_display's frame buffer */
-   if (hgl_dpy->native_csf && glview_api() != NULL
+   if (hgl_dpy->v3d && glview_api() != NULL
        && getenv("HGL_NO_DIRECT_PRESENT") == NULL) {
       wgl_surf->glview = glview_api()->attach(native_window, wgl_surf,
                                               glview_represent);
@@ -794,6 +802,21 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
          v3d_device = "/dev/graphics/v3d/0";
       if (access(v3d_device, R_OK | W_OK) == 0)
          screen = v3d_haiku_screen_create(v3d_device);
+      if (screen != NULL)
+         hgl_dpy->native_csf = hgl_dpy->v3d = true;
+   }
+#endif
+#ifdef GALLIUM_VC4
+   /* Raspberry Pi 1 to 3: the VideoCore IV 3D device whenever its driver
+    * published it. HAIKU_VC4_DEVICE names another one; LIBGL_ALWAYS_SOFTWARE
+    * skips it. Frames are rendered into the GPU's buffers and copied into
+    * the window's bitmap by the CPU (haiku_present_texture()). */
+   if (screen == NULL && !disp->Options.ForceSoftware) {
+      const char *vc4_device = getenv("HAIKU_VC4_DEVICE");
+      if (vc4_device == NULL || *vc4_device == '\0')
+         vc4_device = "/dev/graphics/vc4/0";
+      if (access(vc4_device, R_OK | W_OK) == 0)
+         screen = vc4_haiku_screen_create(vc4_device);
       if (screen != NULL)
          hgl_dpy->native_csf = true;
    }

@@ -111,6 +111,17 @@ drmIoctl(int fd, unsigned long request, void *arg)
    }
 }
 
+/* No DRM capabilities (vc4 asks for DRM_CAP_SYNCOBJ): neither device has
+ * sync objects in the sense of the cap. */
+static inline int
+drmGetCap(int fd, uint64_t capability, uint64_t *value)
+{
+   (void)fd; (void)capability;
+   *value = 0;
+   errno = EINVAL;
+   return -EINVAL;
+}
+
 static inline int
 drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 {

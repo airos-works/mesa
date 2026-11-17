@@ -32,4 +32,10 @@ struct pipe_screen *vc4_drm_screen_create(int drmFD,
 struct pipe_screen *vc4_drm_screen_create_renderonly(int fd, struct renderonly *ro,
                                                      const struct pipe_screen_config *config);
 
+#ifdef __HAIKU__
+/* Opens the VideoCore IV 3D device of air/OS (the Raspberry Pi 1 to 3) and
+ * creates the screen on it. */
+struct pipe_screen *vc4_haiku_screen_create(const char *device);
+#endif
+
 #endif /* __VC4_DRM_PUBLIC_H__ */

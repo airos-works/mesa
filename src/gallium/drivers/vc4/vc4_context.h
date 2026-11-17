@@ -33,6 +33,7 @@
 #include "util/slab.h"
 #include "util/u_debug_cb.h"
 #include "xf86drm.h"
+#include "vc4_haiku.h"
 
 #define __user
 #include "drm-uapi/vc4_drm.h"
@@ -467,6 +468,8 @@ vc4_ioctl(int fd, unsigned long request, void *arg)
 {
 #ifdef USE_VC4_SIMULATOR
         return vc4_simulator_ioctl(fd, request, arg);
+#elif defined(__HAIKU__)
+        return vc4_haiku_ioctl(fd, request, arg);
 #else
         return drmIoctl(fd, request, arg);
 #endif

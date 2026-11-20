@@ -38,6 +38,11 @@ nvc0_decoder_bsp_begin(struct nouveau_vp3_decoder *dec, unsigned comm_seq)
    struct nouveau_bo *bsp_bo = dec->bsp_bo[comm_seq % NOUVEAU_VP3_VIDEO_QDEPTH];
    unsigned ret = 0;
 
+   /* No bitstream position until the buffer is ours: decode_bitstream and
+    * end_frame drop the picture while bsp_ptr is NULL.
+    */
+   dec->bsp_ptr = NULL;
+
    ret = BO_MAP(screen, bsp_bo, NOUVEAU_BO_WR, dec->client);
    if (ret) {
       debug_printf("map failed: %i %s\n", ret, strerror(-ret));
@@ -60,6 +65,10 @@ nvc0_decoder_bsp_next(struct nouveau_vp3_decoder *dec,
    uint32_t bsp_size = 0;
    uint32_t i = 0;
    unsigned ret = 0;
+
+   /* bsp_begin could not map the buffer, or an earlier call failed */
+   if (!dec->bsp_ptr)
+      return -1;
 
    bsp_size = dec->bsp_ptr - (char *)bsp_bo->map;
    for (i = 0; i < num_buffers; i++)
@@ -87,6 +96,7 @@ nvc0_decoder_bsp_next(struct nouveau_vp3_decoder *dec,
       ret = BO_MAP(screen, tmp_bo, NOUVEAU_BO_WR, dec->client);
       if (ret) {
          debug_printf("map failed: %i %s\n", ret, strerror(-ret));
+         nouveau_bo_ref(NULL, &tmp_bo);
          return -1;
       }
 
@@ -119,6 +129,7 @@ nvc0_decoder_bsp_next(struct nouveau_vp3_decoder *dec,
       ret = BO_MAP(screen, tmp_bo, NOUVEAU_BO_WR, dec->client);
       if (ret) {
          debug_printf("map failed: %i %s\n", ret, strerror(-ret));
+         nouveau_bo_ref(NULL, &tmp_bo);
          return -1;
       }
 

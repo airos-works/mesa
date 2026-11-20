@@ -32,15 +32,16 @@ nvc0_decoder_begin_frame(struct pipe_video_codec *decoder,
 {
    struct nouveau_vp3_decoder *dec = (struct nouveau_vp3_decoder *)decoder;
    uint32_t comm_seq = ++dec->fence_seq;
-   ASSERTED unsigned ret = 0; /* used in debug checks */
 
    assert(dec);
    assert(target);
    assert(target->buffer_format == PIPE_FORMAT_NV12);
 
-   ret = nvc0_decoder_bsp_begin(dec, comm_seq);
-
-   assert(ret == 2);
+   /* On failure bsp_ptr stays NULL, and the rest of the picture is dropped:
+    * end_frame reports the error.
+    */
+   if (nvc0_decoder_bsp_begin(dec, comm_seq) != 2)
+      debug_printf("nvc0: can't start picture %u\n", comm_seq);
 }
 
 static void
@@ -53,13 +54,17 @@ nvc0_decoder_decode_bitstream(struct pipe_video_codec *decoder,
 {
    struct nouveau_vp3_decoder *dec = (struct nouveau_vp3_decoder *)decoder;
    uint32_t comm_seq = dec->fence_seq;
-   ASSERTED unsigned ret = 0; /* used in debug checks */
 
    assert(decoder);
 
-   ret = nvc0_decoder_bsp_next(dec, comm_seq, num_buffers, data, num_bytes);
+   /* the picture is already dropped */
+   if (!dec->bsp_ptr)
+      return;
 
-   assert(ret == 2);
+   if (nvc0_decoder_bsp_next(dec, comm_seq, num_buffers, data, num_bytes) != 2) {
+      debug_printf("nvc0: can't queue the bitstream of picture %u\n", comm_seq);
+      dec->bsp_ptr = NULL;
+   }
 }
 
 static int
@@ -77,6 +82,15 @@ nvc0_decoder_end_frame(struct pipe_video_codec *decoder,
    struct nouveau_vp3_video_buffer *refs[16] = {};
 
    desc.base = picture;
+
+   /* begin_frame or decode_bitstream failed: nothing was written for this
+    * picture, so don't hand BSP, VP and PPP a sequence number that BSP
+    * never gets data for.
+    */
+   if (!dec->bsp_ptr) {
+      debug_printf("nvc0: dropping picture %u\n", comm_seq);
+      return -1;
+   }
 
    ret = nvc0_decoder_bsp_end(dec, desc, target, comm_seq, &vp_caps, &is_ref, refs);
 

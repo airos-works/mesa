@@ -41,19 +41,21 @@ nv98_decoder_decode_bitstream(struct pipe_video_codec *decoder,
    union pipe_desc desc;
 
    unsigned vp_caps, is_ref;
-   ASSERTED unsigned ret; /* used in debug checks */
    struct nouveau_vp3_video_buffer *refs[16] = {};
 
    desc.base = picture;
 
    assert(target->base.buffer_format == PIPE_FORMAT_NV12);
 
-   ret = nv98_decoder_bsp(dec, desc, target, comm_seq,
-                          num_buffers, data, num_bytes,
-                          &vp_caps, &is_ref, refs);
-
-   /* did we decode bitstream correctly? */
-   assert(ret == 2);
+   /* If BSP got nothing for this picture, VP and PPP must not get its
+    * sequence number either: VP would wait for BSP output that never comes.
+    */
+   if (nv98_decoder_bsp(dec, desc, target, comm_seq,
+                        num_buffers, data, num_bytes,
+                        &vp_caps, &is_ref, refs) != 2) {
+      debug_printf("nv98: dropping picture %u\n", comm_seq);
+      return;
+   }
 
    nv98_decoder_vp(dec, desc, target, comm_seq, vp_caps, is_ref, refs);
    nv98_decoder_ppp(dec, desc, target, comm_seq);

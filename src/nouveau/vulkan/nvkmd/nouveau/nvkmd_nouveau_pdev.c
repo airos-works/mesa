@@ -12,9 +12,25 @@
 #include "vk_log.h"
 
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <xf86drm.h>
+
+#ifdef __HAIKU__
+/* Haiku's devfs nodes have no device numbers: they are made up as libdrm
+ * makes them (xf86drm.c), Linux's DRM major and the minor in the node's
+ * name, for VK_EXT_physical_device_drm. */
+static dev_t
+nvkmd_haiku_node_devid(const char *path)
+{
+   const char *end = path + strlen(path);
+   const char *digits = end;
+   while (digits > path && digits[-1] >= '0' && digits[-1] <= '9')
+      digits--;
+   return (dev_t)((226u << 16) | (unsigned)(atoi(digits) & 0xffff));
+}
+#endif
 
 static bool
 drm_device_is_nouveau(const char *path)
@@ -82,7 +98,12 @@ nvkmd_nouveau_try_create_pdev(struct _drmDevice *drm_device,
                        "fstat() failed on %s: %m",
                        drm_device->nodes[DRM_NODE_RENDER]);
    }
+#ifdef __HAIKU__
+   const dev_t render_dev =
+      nvkmd_haiku_node_devid(drm_device->nodes[DRM_NODE_RENDER]);
+#else
    const dev_t render_dev = st.st_rdev;
+#endif
 
    struct nvkmd_nouveau_pdev *pdev = CALLOC_STRUCT(nvkmd_nouveau_pdev);
    if (pdev == NULL) {
@@ -94,11 +115,22 @@ nvkmd_nouveau_try_create_pdev(struct _drmDevice *drm_device,
    pdev->base.debug_flags = debug_flags;
    pdev->base.dev_info = ws_dev->info;
    pdev->base.kmd_info = (struct nvkmd_info) {
+#ifdef __HAIKU__
+      /* no dma-buf file descriptors on Haiku, and the driver's mappings
+       * cannot replace a reservation in place */
+      .has_dma_buf = false,
+#else
       .has_dma_buf = true,
+#endif
       .has_get_vram_used = nouveau_ws_device_vram_used(ws_dev) != 0,
       .has_alloc_tiled = nouveau_ws_device_has_tiled_bo(ws_dev),
+#ifdef __HAIKU__
+      .has_map_fixed = false,
+      .has_overmap = false,
+#else
       .has_map_fixed = true,
       .has_overmap = true,
+#endif
    };
 
    /* We get this ourselves */
@@ -116,8 +148,14 @@ nvkmd_nouveau_try_create_pdev(struct _drmDevice *drm_device,
 
    /* DRM primary is optional */
    if ((drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) &&
-       !stat(drm_device->nodes[DRM_NODE_PRIMARY], &st))
+       !stat(drm_device->nodes[DRM_NODE_PRIMARY], &st)) {
+#ifdef __HAIKU__
+      pdev->base.drm.primary_dev =
+         nvkmd_haiku_node_devid(drm_device->nodes[DRM_NODE_PRIMARY]);
+#else
       pdev->base.drm.primary_dev = st.st_rdev;
+#endif
+   }
 
    pdev->primary_fd = -1;
    pdev->ws_dev = ws_dev;

@@ -28,7 +28,14 @@
 #include "vk_shader_module.h"
 #include "vulkan/wsi/wsi_common.h"
 
+#ifdef MAJOR_IN_SYSMACROS
 #include <sys/sysmacros.h>
+#endif
+#ifdef __HAIKU__
+/* DRM device numbers as libdrm makes them up on Haiku (xf86drm.c) */
+#define major(dev) ((int)(((dev) >> 16) & 0xffff))
+#define minor(dev) ((int)((dev) & 0xffff))
+#endif
 
 #include "nv_push.h"
 #include "cl90c0.h"
@@ -238,7 +245,10 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_legacy_vertex_attributes = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
+#ifndef __HAIKU__
+      /* nouveau_drm's mappings cannot replace a reservation (MAP_FIXED) */
       .EXT_map_memory_placed = true,
+#endif
       .EXT_memory_budget = true,
       .EXT_multi_draw = true,
       .EXT_mutable_descriptor_type = true,
@@ -651,9 +661,11 @@ nvk_get_device_features(const struct nv_device_info *info,
       .legacyVertexAttributes = true,
 
       /* VK_EXT_map_memory_placed */
+#ifndef __HAIKU__
       .memoryMapPlaced = true,
       .memoryMapRangePlaced = false,
       .memoryUnmapReserve = true,
+#endif
 
       /* VK_EXT_multi_draw */
       .multiDraw = true,

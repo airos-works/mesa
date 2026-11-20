@@ -9,8 +9,10 @@
 
 #include "vulkan/wsi/wsi_common.h"
 
+#include "git_sha1.h"
 #include "util/build_id.h"
 #include "util/detect_os.h"
+#include "util/disk_cache.h"
 #include "util/driconf.h"
 #include "util/mesa-sha1.h"
 #include "util/u_debug.h"
@@ -163,6 +165,7 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       nvk_create_drm_physical_device;
    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
 
+#ifdef HAVE_DL_ITERATE_PHDR
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(nvk_CreateInstance);
    if (!note) {
@@ -180,6 +183,22 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
    memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
+#else
+   /* No dl_iterate_phdr() to find the build-id (Haiku): the driver is told
+    * apart as the shader cache tells it apart, by its library file (RADV's
+    * way), with Mesa's version and commit. */
+   struct mesa_sha1 sha_ctx;
+   _mesa_sha1_init(&sha_ctx);
+   if (!disk_cache_get_function_identifier(nvk_CreateInstance, &sha_ctx)) {
+      result = vk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,
+                         "Failed to identify the driver's library");
+      goto fail_init;
+   }
+   static const char version[] = PACKAGE_VERSION MESA_GIT_SHA1;
+   _mesa_sha1_update(&sha_ctx, version, sizeof(version));
+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
+   _mesa_sha1_final(&sha_ctx, instance->driver_build_sha);
+#endif
 
    *pInstance = nvk_instance_to_handle(instance);
    return VK_SUCCESS;

@@ -9,6 +9,9 @@
 #include "vk_log.h"
 
 #include <sys/mman.h>
+#ifdef __HAIKU__
+#include <xf86drm.h> /* drmHaikuMmap() */
+#endif
 
 VkResult
 nvkmd_nouveau_alloc_mem(struct nvkmd_dev *dev,
@@ -229,8 +232,15 @@ nvkmd_nouveau_mem_map(struct nvkmd_mem *_mem,
    if (map_flags & NVKMD_MEM_MAP_FIXED)
       flags |= MAP_FIXED;
 
+#ifdef __HAIKU__
+   /* nouveau_drm maps buffer objects with an ioctl of its own (libdrm's
+    * drm_haiku.h): Haiku cannot mmap() a device. */
+   void *map = drmHaikuMmap(fixed_addr, mem->base.size_B, prot, flags,
+                            dev->ws_dev->fd, mem->bo->map_handle);
+#else
    void *map = mmap(fixed_addr, mem->base.size_B, prot, flags,
                     dev->ws_dev->fd, mem->bo->map_handle);
+#endif
    if (map == MAP_FAILED)
       return vk_error(log_obj, VK_ERROR_MEMORY_MAP_FAILED);
 
@@ -246,7 +256,11 @@ nvkmd_nouveau_mem_unmap(struct nvkmd_mem *_mem,
 {
    struct nvkmd_nouveau_mem *mem = nvkmd_nouveau_mem(_mem);
 
+#ifdef __HAIKU__
+   drmHaikuMunmap(map, mem->base.size_B);
+#else
    munmap(map, mem->base.size_B);
+#endif
 }
 
 static VkResult
@@ -257,6 +271,13 @@ nvkmd_nouveau_mem_overmap(struct nvkmd_mem *_mem,
 {
    struct nvkmd_nouveau_mem *mem = nvkmd_nouveau_mem(_mem);
 
+#ifdef __HAIKU__
+   /* The mapping is an area nouveau_drm made: it is given back to the
+    * driver before the reservation takes its place (not atomically, unlike
+    * Linux's MAP_FIXED; NVK does not offer VK_EXT_map_memory_placed on
+    * Haiku, whose unmaps are the ones that come here). */
+   drmHaikuMunmap(map, mem->base.size_B);
+#endif
    void *new_map = mmap(map, mem->base.size_B, PROT_NONE,
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
    if (new_map == MAP_FAILED) {

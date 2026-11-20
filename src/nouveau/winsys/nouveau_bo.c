@@ -279,8 +279,14 @@ nouveau_ws_bo_map(struct nouveau_ws_bo *bo,
       prot |= PROT_WRITE;
 
 
+#ifdef __HAIKU__
+   /* Haiku cannot mmap() a device (libdrm's drm_haiku.h) */
+   void *res = drmHaikuMmap(NULL, bo->size, prot, MAP_SHARED,
+                            bo->dev->fd, bo->map_handle);
+#else
    void *res = mmap(NULL, bo->size, prot, MAP_SHARED,
                     bo->dev->fd, bo->map_handle);
+#endif
    if (res == MAP_FAILED)
       return NULL;
 
@@ -290,7 +296,11 @@ nouveau_ws_bo_map(struct nouveau_ws_bo *bo,
 void
 nouveau_ws_bo_unmap(struct nouveau_ws_bo *bo, void *ptr)
 {
+#ifdef __HAIKU__
+   drmHaikuMunmap(ptr, bo->size);
+#else
    munmap(ptr, bo->size);
+#endif
 }
 
 bool

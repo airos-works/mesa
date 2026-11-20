@@ -56,11 +56,20 @@
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
-#ifdef GALLIUM_RADEONSI
+#if defined(GALLIUM_RADEONSI) || defined(GALLIUM_NOUVEAU)
+/* Gallium drivers on a Linux DRM driver ported as a Haiku add-on */
+#define HAIKU_DRM_SCREENS 1
 #include <fcntl.h>
 #include <xf86drm.h>
+#endif
+#ifdef GALLIUM_RADEONSI
 extern "C" {
 #include "radeonsi/si_public.h"
+}
+#endif
+#ifdef GALLIUM_NOUVEAU
+extern "C" {
+#include "nouveau/drm/nouveau_drm_public.h"
 }
 #endif
 #ifdef GALLIUM_ZINK
@@ -95,6 +104,9 @@ _EGL_DRIVER_STANDARD_TYPECASTS(haiku_egl)
 struct haiku_egl_display {
    int ref_count;
    bool native_csf;
+   /* radeonsi on amdgpu_drm: frames can also go straight into the screen
+    * (haiku_drm_present.h) */
+   bool drm_present;
    /* Zink over the software winsys: its flush_frontbuffer() shows only Kopper
     * swap chains, which Haiku has none of, so window surfaces are presented by
     * copying each frame into the view's bitmap (haiku_present_texture). */
@@ -286,22 +298,41 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
    return true;
 }
 
-#ifdef GALLIUM_RADEONSI
-/* AMD GPUs render through the amdgpu_drm add-on, Linux's DRM driver: radeonsi
- * on the render node MESA_HAIKU_DRM_DEVICE names, or else on the first AMD
- * one. Frames are presented by copying them into the window's bitmap.
+#ifdef HAIKU_DRM_SCREENS
+/* GPUs whose Linux DRM driver is ported as a Haiku add-on: AMD ones render
+ * through amdgpu_drm with radeonsi, NVIDIA ones through nouveau_drm with
+ * nouveau (nv50 for Tesla, nvc0 for Fermi and Kepler). On the render node
+ * MESA_HAIKU_DRM_DEVICE names, or else on the first one of a GPU there is a
+ * driver for; the kernel driver's name picks the Gallium driver. Frames are
+ * presented by copying them into the window's bitmap, radeonsi's also
+ * straight into the screen (*drm_present).
  */
+static bool
+haiku_drm_vendor_supported(uint16_t vendor)
+{
+#ifdef GALLIUM_RADEONSI
+   if (vendor == 0x1002)
+      return true;
+#endif
+#ifdef GALLIUM_NOUVEAU
+   if (vendor == 0x10de)
+      return true;
+#endif
+   return false;
+}
+
 static struct pipe_screen *
-haiku_amdgpu_screen_create(void)
+haiku_drm_screen_create(bool *drm_present)
 {
    const char *path = getenv("MESA_HAIKU_DRM_DEVICE");
    char *found = NULL;
+   *drm_present = false;
    if (!path || !*path) {
       drmDevicePtr devices[16];
       int count = drmGetDevices2(0, devices, 16);
       for (int i = 0; i < count && !found; i++) {
          if (devices[i]->bustype == DRM_BUS_PCI &&
-             devices[i]->deviceinfo.pci->vendor_id == 0x1002 &&
+             haiku_drm_vendor_supported(devices[i]->deviceinfo.pci->vendor_id) &&
              (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)))
             found = strdup(devices[i]->nodes[DRM_NODE_RENDER]);
       }
@@ -316,7 +347,26 @@ haiku_amdgpu_screen_create(void)
    if (fd < 0)
       return NULL;
    /* the winsys keeps a duplicate of the file */
-   struct pipe_screen *screen = radeonsi_haiku_screen_create(fd);
+   struct pipe_screen *screen = NULL;
+   drmVersionPtr version = drmGetVersion(fd);
+   if (version != NULL) {
+#ifdef GALLIUM_RADEONSI
+      if (strcmp(version->name, "amdgpu") == 0) {
+         screen = radeonsi_haiku_screen_create(fd);
+         *drm_present = screen != NULL;
+      }
+#endif
+#ifdef GALLIUM_NOUVEAU
+      if (strcmp(version->name, "nouveau") == 0)
+         screen = nouveau_drm_screen_create(fd);
+#endif
+      if (screen == NULL && getenv("HGL_TRACE") != NULL) {
+         fprintf(stderr, "egl_haiku: no Gallium screen on %s (DRM driver "
+                 "%s)\n", getenv("MESA_HAIKU_DRM_DEVICE") ? getenv("MESA_HAIKU_DRM_DEVICE")
+                 : "the first GPU", version->name);
+      }
+      drmFreeVersion(version);
+   }
    close(fd);
    return screen;
 }
@@ -364,7 +414,7 @@ haiku_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
       wgl_surf->fb->present = haiku_present_texture;
 #ifdef GALLIUM_RADEONSI
    /* radeonsi on amdgpu_drm can copy into the screen's frame buffer */
-   if (hgl_dpy->native_csf && glview_api() != NULL
+   if (hgl_dpy->drm_present && glview_api() != NULL
        && getenv("HGL_NO_DIRECT_PRESENT") == NULL) {
       wgl_surf->glview = glview_api()->attach(native_window, wgl_surf,
                                               glview_represent);
@@ -721,10 +771,10 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
    disp->DriverData = (void *)hgl_dpy;
 
    struct pipe_screen *screen = NULL;
-#ifdef GALLIUM_RADEONSI
+#ifdef HAIKU_DRM_SCREENS
    if (!disp->Options.ForceSoftware
        && !debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false)) {
-      screen = haiku_amdgpu_screen_create();
+      screen = haiku_drm_screen_create(&hgl_dpy->drm_present);
       if (screen)
          hgl_dpy->native_csf = true;
    }
@@ -770,7 +820,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
             winsys->destroy(winsys);
       }
    }
-#ifdef GALLIUM_RADEONSI
+#ifdef HAIKU_DRM_SCREENS
    }
 #endif
    if (!screen) {

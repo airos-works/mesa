@@ -152,6 +152,10 @@ void nouveau_screen_fini(struct nouveau_screen *);
 
 void nouveau_screen_init_vdec(struct nouveau_screen *);
 
+/* Where the firmware file \a name of the video engines that user space
+ * loads is (path holds PATH_MAX bytes). */
+void nouveau_firmware_path(char *path, const char *name);
+
 int
 nouveau_pushbuf_create(struct nouveau_screen *, struct nouveau_context *, struct nouveau_client *,
                        struct nouveau_object *chan, int nr, uint32_t size,

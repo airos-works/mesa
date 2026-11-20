@@ -21,6 +21,19 @@
 #include "util/u_atomic.h"
 #include "util/u_memory.h"
 
+#ifdef __HAIKU__
+/* Haiku cannot mmap() a device: nouveau_drm maps buffer objects into the
+ * team with an ioctl of its own (libdrm's drm_haiku.h), which these wrap.
+ * drmHaikuMunmap() hands an address it did not map to munmap(). */
+#define nouveau_mmap(addr, size, prot, flags, fd, offset) \
+   drmHaikuMmap(addr, size, prot, flags, fd, offset)
+#define nouveau_munmap(addr, size) drmHaikuMunmap(addr, size)
+#else
+#define nouveau_mmap(addr, size, prot, flags, fd, offset) \
+   os_mmap(addr, size, prot, flags, fd, offset)
+#define nouveau_munmap(addr, size) os_munmap(addr, size)
+#endif
+
 static FILE *nouveau_out = NULL;
 static uint32_t nouveau_debug = 0;
 
@@ -747,7 +760,7 @@ nouveau_bo_del(struct nouveau_bo *bo)
       drmCloseBufferHandle(drm->fd, bo->handle);
    }
    if (bo->map)
-      os_munmap(bo->map, bo->size);
+      nouveau_munmap(bo->map, bo->size);
    free(nvbo);
 }
 
@@ -757,13 +770,22 @@ nouveau_bo_map(struct nouveau_bo *bo, uint32_t access, struct nouveau_client *cl
    struct nouveau_drm *drm = nouveau_drm(&bo->device->object);
    struct nouveau_bo_priv *nvbo = nouveau_bo(bo);
    if (bo->map == NULL) {
-      bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED, drm->fd, nvbo->map_handle);
+      bo->map = nouveau_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED, drm->fd, nvbo->map_handle);
       if (bo->map == MAP_FAILED) {
          bo->map = NULL;
          return -errno;
       }
    }
    return nouveau_bo_wait(bo, access, client);
+}
+
+void
+nouveau_bo_unmap(struct nouveau_bo *bo)
+{
+   if (bo->map) {
+      nouveau_munmap(bo->map, bo->size);
+      bo->map = NULL;
+   }
 }
 
 int

@@ -153,12 +153,19 @@ elif with_platform_haiku
 
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl, libglapi]
   deps_for_egl += [cpp.find_library('be'), driver_swrast, driver_panfrost, driver_zink, idep_xmlconfig]
+  if with_gallium_radeonsi or with_gallium_nouveau
+    # radeonsi's and nouveau's video code is in the Gallium video library
+    link_for_egl += [libgalliumvl]
+    deps_for_egl += [dep_libdrm]
+  endif
   if with_gallium_radeonsi
     # Summit's present into the screen (haiku_drm_present.h)
     files_egl += files('drivers/haiku/haiku_drm_present.c')
-    # radeonsi's video code is in the Gallium video library
-    link_for_egl += [libgalliumvl]
-    deps_for_egl += [driver_radeonsi, dep_libdrm]
+    deps_for_egl += [driver_radeonsi]
+  endif
+  if with_gallium_nouveau
+    # NVIDIA GPUs on nouveau_drm
+    deps_for_egl += [driver_nouveau]
   endif
 elif with_platform_windows
   c_args_for_egl += [

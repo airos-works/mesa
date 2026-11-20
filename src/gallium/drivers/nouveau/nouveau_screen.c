@@ -16,7 +16,9 @@
 
 #include <stdio.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "drm-uapi/nouveau_drm.h"
 #include <xf86drm.h>
@@ -289,6 +291,29 @@ nouveau_device_uuid(struct pipe_screen *pscreen, char *uuid)
 {
    const struct nouveau_screen *screen = nouveau_screen(pscreen);
    nv_device_uuid(&screen->device->info, (void *)uuid, PIPE_UUID_SIZE, false);
+}
+
+void
+nouveau_firmware_path(char *path, const char *name)
+{
+#ifdef __HAIKU__
+   /* No /lib/firmware: the directories nouveau_drm's request_firmware()
+    * looks in, the first that has the file. */
+   static const char *const dirs[] = {
+      "/boot/home/config/non-packaged/data/firmware/nouveau",
+      "/boot/system/non-packaged/data/firmware/nouveau",
+      "/boot/system/data/firmware/nouveau",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(dirs); i++) {
+      struct stat st;
+      snprintf(path, PATH_MAX, "%s/%s", dirs[i], name);
+      if (stat(path, &st) == 0)
+         return;
+   }
+   /* none has it: the system's for the messages */
+#else
+   snprintf(path, PATH_MAX, "/lib/firmware/nouveau/%s", name);
+#endif
 }
 
 int

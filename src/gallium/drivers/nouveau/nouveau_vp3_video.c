@@ -249,15 +249,15 @@ static void vp3_getpath(enum pipe_video_profile profile, char *path)
 {
    switch (u_reduce_video_profile(profile)) {
       case PIPE_VIDEO_FORMAT_MPEG12: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-vp3-mpeg12-0");
+         nouveau_firmware_path(path, "vuc-vp3-mpeg12-0");
          break;
       }
       case PIPE_VIDEO_FORMAT_VC1: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-vp3-vc1-0");
+         nouveau_firmware_path(path, "vuc-vp3-vc1-0");
          break;
       }
       case PIPE_VIDEO_FORMAT_MPEG4_AVC: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-vp3-h264-0");
+         nouveau_firmware_path(path, "vuc-vp3-h264-0");
          break;
       }
       default: assert(0);
@@ -268,19 +268,19 @@ static void vp4_getpath(enum pipe_video_profile profile, char *path)
 {
    switch (u_reduce_video_profile(profile)) {
       case PIPE_VIDEO_FORMAT_MPEG12: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-mpeg12-0");
+         nouveau_firmware_path(path, "vuc-mpeg12-0");
          break;
       }
       case PIPE_VIDEO_FORMAT_MPEG4: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-mpeg4-0");
+         nouveau_firmware_path(path, "vuc-mpeg4-0");
          break;
       }
       case PIPE_VIDEO_FORMAT_VC1: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-vc1-0");
+         nouveau_firmware_path(path, "vuc-vc1-0");
          break;
       }
       case PIPE_VIDEO_FORMAT_MPEG4_AVC: {
-         sprintf(path, "/lib/firmware/nouveau/vuc-h264-0");
+         nouveau_firmware_path(path, "vuc-h264-0");
          break;
       }
       default: assert(0);
@@ -360,8 +360,7 @@ nouveau_vp3_load_firmware(struct nouveau_vp3_decoder *dec,
       default:
          return 1;
    }
-   munmap(dec->fw_bo->map, dec->fw_bo->size);
-   dec->fw_bo->map = NULL;
+   nouveau_bo_unmap(dec->fw_bo);
    return 0;
 }
 

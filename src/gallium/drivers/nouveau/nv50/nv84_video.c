@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include "util/format/u_format.h"
 #include "util/u_sampler.h"
@@ -71,10 +72,16 @@ nv84_load_firmwares(struct nouveau_device *dev, struct nv84_decoder *dec,
    int ret, size1, size2 = 0;
    struct nouveau_bo *fw;
    struct nouveau_screen *screen = nouveau_screen(dec->base.context->screen);
+   char path1[PATH_MAX], path2[PATH_MAX];
 
+   nouveau_firmware_path(path1, fw1);
+   fw1 = path1;
    size1 = filesize(fw1);
-   if (fw2)
+   if (fw2) {
+      nouveau_firmware_path(path2, fw2);
+      fw2 = path2;
       size2 = filesize(fw2);
+   }
    if (size1 < 0 || size2 < 0)
       return NULL;
 
@@ -90,8 +97,7 @@ nv84_load_firmwares(struct nouveau_device *dev, struct nv84_decoder *dec,
    ret = nv84_copy_firmware(fw1, fw->map, size1);
    if (fw2 && !ret)
       ret = nv84_copy_firmware(fw2, fw->map + dec->vp_fw2_offset, size2);
-   munmap(fw->map, fw->size);
-   fw->map = NULL;
+   nouveau_bo_unmap(fw);
    if (!ret)
       return fw;
 error:
@@ -103,7 +109,7 @@ static struct nouveau_bo *
 nv84_load_bsp_firmware(struct nouveau_device *dev, struct nv84_decoder *dec)
 {
    return nv84_load_firmwares(
-         dev, dec, "/lib/firmware/nouveau/nv84_bsp-h264", NULL);
+         dev, dec, "nv84_bsp-h264", NULL);
 }
 
 static struct nouveau_bo *
@@ -111,15 +117,15 @@ nv84_load_vp_firmware(struct nouveau_device *dev, struct nv84_decoder *dec)
 {
    return nv84_load_firmwares(
          dev, dec,
-         "/lib/firmware/nouveau/nv84_vp-h264-1",
-         "/lib/firmware/nouveau/nv84_vp-h264-2");
+         "nv84_vp-h264-1",
+         "nv84_vp-h264-2");
 }
 
 static struct nouveau_bo *
 nv84_load_vp_firmware_mpeg(struct nouveau_device *dev, struct nv84_decoder *dec)
 {
    return nv84_load_firmwares(
-         dev, dec, "/lib/firmware/nouveau/nv84_vp-mpeg12", NULL);
+         dev, dec, "nv84_vp-mpeg12", NULL);
 }
 
 static void
@@ -782,7 +788,9 @@ firmware_present(struct pipe_screen *pscreen, enum pipe_video_format codec)
       }
 
       if (!FIRMWARE_PRESENT(checked, VP_H264_1)) {
-         ret = stat("/lib/firmware/nouveau/nv84_vp-h264-1", &s);
+         char path[PATH_MAX];
+         nouveau_firmware_path(path, "nv84_vp-h264-1");
+         ret = stat(path, &s);
          if (!ret && s.st_size > 1000)
             screen->firmware_info.profiles_present |= FIRMWARE_VP_H264_1;
          screen->firmware_info.profiles_checked |= FIRMWARE_VP_H264_1;
@@ -796,7 +804,9 @@ firmware_present(struct pipe_screen *pscreen, enum pipe_video_format codec)
          FIRMWARE_PRESENT(present, VP_H264_1);
    } else {
       if (!FIRMWARE_PRESENT(checked, VP_MPEG2)) {
-         ret = stat("/lib/firmware/nouveau/nv84_vp-mpeg12", &s);
+         char path[PATH_MAX];
+         nouveau_firmware_path(path, "nv84_vp-mpeg12");
+         ret = stat(path, &s);
          if (!ret && s.st_size > 1000)
             screen->firmware_info.profiles_present |= FIRMWARE_VP_MPEG2;
          screen->firmware_info.profiles_checked |= FIRMWARE_VP_MPEG2;

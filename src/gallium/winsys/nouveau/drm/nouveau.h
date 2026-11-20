@@ -177,6 +177,8 @@ int nouveau_object_mclass(struct nouveau_object *, const struct nouveau_mclass *
 int nouveau_bo_new(struct nouveau_device *, uint32_t flags, uint32_t align, uint64_t size,
                    union nouveau_bo_config *, struct nouveau_bo **);
 int nouveau_bo_map(struct nouveau_bo *, uint32_t access, struct nouveau_client *);
+/* undoes nouveau_bo_map() before the buffer object goes */
+void nouveau_bo_unmap(struct nouveau_bo *);
 int nouveau_bo_name_get(struct nouveau_bo *, uint32_t *name);
 int nouveau_bo_name_ref(struct nouveau_device *, uint32_t name, struct nouveau_bo **);
 int nouveau_bo_prime_handle_ref(struct nouveau_device *, int prime_fd, struct nouveau_bo **);

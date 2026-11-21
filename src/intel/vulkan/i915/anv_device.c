@@ -121,11 +121,15 @@ anv_i915_physical_device_get_parameters(struct anv_physical_device *device)
       return result;
    }
 
+#ifndef __HAIKU__
+   /* (i915_drm on Haiku exports no dma-buf files: Vulkan's windows there
+    * are wl_shm copies, which need no implicit sync through them) */
    if (!i915_gem_supports_dma_buf_sync_file(fd)) {
       result = vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
                          "kernel missing dma-buf sync file import/export");
       return result;
    }
+#endif
 
    /* Start with medium; sorted low to high */
    const VkQueueGlobalPriorityKHR priorities[] = {

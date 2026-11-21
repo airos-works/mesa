@@ -805,6 +805,10 @@ struct anv_free_entry {
 struct anv_state_table {
    struct anv_device *device;
    int fd;
+#ifdef __HAIKU__
+   /* anonymous memory in place of the memfd (anv_state_table_init()) */
+   void *haiku_map;
+#endif
    struct anv_free_entry *map;
    uint32_t size;
    uint64_t max_size;
@@ -2828,6 +2832,11 @@ VkResult anv_device_map_bo(struct anv_device *device,
                            size_t size,
                            void *placed_addr,
                            void **map_out);
+#ifdef __HAIKU__
+/* Buffer object mappings that start inside i915_drm's area (anv_allocator.c) */
+bool anv_haiku_mapping_add(void *address, void *base);
+void *anv_haiku_mapping_take(void *address);
+#endif
 VkResult anv_device_unmap_bo(struct anv_device *device,
                              struct anv_bo *bo,
                              void *map, size_t map_size,

@@ -34,6 +34,52 @@
 #include "util/anon_file.h"
 #include "util/futex.h"
 
+#ifdef __HAIKU__
+#include <xf86drm.h> /* drmHaikuMunmap() */
+#ifndef MAP_POPULATE
+#define MAP_POPULATE 0
+#endif
+
+#include "util/hash_table.h"
+#include "util/simple_mtx.h"
+
+/* The mappings of buffer objects that start inside them (slabs, offsets):
+ * i915_drm's mapping is one area from the start of the object, which
+ * drmHaikuMunmap() wants back (i915_gem_mmap_offset()). Keyed by the address
+ * handed out. */
+static simple_mtx_t anv_haiku_mappings_lock = SIMPLE_MTX_INITIALIZER;
+static struct hash_table *anv_haiku_mappings;
+
+bool
+anv_haiku_mapping_add(void *address, void *base)
+{
+   simple_mtx_lock(&anv_haiku_mappings_lock);
+   if (anv_haiku_mappings == NULL)
+      anv_haiku_mappings = _mesa_pointer_hash_table_create(NULL);
+   bool added = anv_haiku_mappings != NULL &&
+                _mesa_hash_table_insert(anv_haiku_mappings, address, base) != NULL;
+   simple_mtx_unlock(&anv_haiku_mappings_lock);
+   return added;
+}
+
+void *
+anv_haiku_mapping_take(void *address)
+{
+   void *base = NULL;
+   simple_mtx_lock(&anv_haiku_mappings_lock);
+   if (anv_haiku_mappings != NULL) {
+      struct hash_entry *entry =
+         _mesa_hash_table_search(anv_haiku_mappings, address);
+      if (entry != NULL) {
+         base = entry->data;
+         _mesa_hash_table_remove(anv_haiku_mappings, entry);
+      }
+   }
+   simple_mtx_unlock(&anv_haiku_mappings_lock);
+   return base;
+}
+#endif
+
 #ifdef HAVE_VALGRIND
 #define VG_NOACCESS_READ(__ptr) ({                       \
    VALGRIND_MAKE_MEM_DEFINED((__ptr), sizeof(*(__ptr))); \
@@ -136,6 +182,17 @@ anv_state_table_init(struct anv_state_table *table,
 
    table->device = device;
 
+#ifdef __HAIKU__
+   /* No memfd on Haiku: an anonymous file is a real one there (on BFS, which
+    * has no sparse files). The table is anonymous memory instead, reserved
+    * whole up-front without committing it, so it never moves as it grows.
+    */
+   table->fd = -1;
+   table->haiku_map = mmap(NULL, BLOCK_POOL_MEMFD_SIZE, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+   if (table->haiku_map == MAP_FAILED)
+      return vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+#else
    /* Just make it 2GB up-front.  The Linux kernel won't actually back it
     * with pages until we either map and fault on one of them or we use
     * userptr and send a chunk of it off to the GPU.
@@ -143,6 +200,7 @@ anv_state_table_init(struct anv_state_table *table,
    table->fd = os_create_anonymous_file(BLOCK_POOL_MEMFD_SIZE, "state table");
    if (table->fd == -1)
       return vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+#endif
 
    if (!u_vector_init(&table->cleanups, 8,
                       sizeof(struct anv_state_table_cleanup))) {
@@ -164,7 +222,11 @@ anv_state_table_init(struct anv_state_table *table,
  fail_cleanups:
    u_vector_finish(&table->cleanups);
  fail_fd:
+#ifdef __HAIKU__
+   munmap(table->haiku_map, BLOCK_POOL_MEMFD_SIZE);
+#else
    close(table->fd);
+#endif
 
    return result;
 }
@@ -181,6 +243,15 @@ anv_state_table_expand_range(struct anv_state_table *table, uint32_t size)
    /* Make sure that we don't go outside the bounds of the memfd */
    if (size > BLOCK_POOL_MEMFD_SIZE)
       return vk_error(table->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+#ifdef __HAIKU__
+   /* the whole reservation is the map (anv_state_table_init()) */
+   (void)cleanup;
+   (void)map;
+   table->map = table->haiku_map;
+   table->size = size;
+   return VK_SUCCESS;
+#endif
 
    cleanup = u_vector_add(&table->cleanups);
    if (!cleanup)
@@ -257,7 +328,11 @@ anv_state_table_finish(struct anv_state_table *table)
 
    u_vector_finish(&table->cleanups);
 
+#ifdef __HAIKU__
+   munmap(table->haiku_map, BLOCK_POOL_MEMFD_SIZE);
+#else
    close(table->fd);
+#endif
 }
 
 VkResult
@@ -1873,6 +1948,15 @@ anv_device_unmap_bo(struct anv_device *device,
       }
       assert(((uintptr_t)map & (page_size - 1)) == 0);
    }
+
+#ifdef __HAIKU__
+   /* A mapping i915_drm made (i915_gem_mmap_offset()): the whole area goes,
+    * from its start. No reservation to put back: no placed mappings. */
+   assert(!replace);
+   void *base = anv_haiku_mapping_take(map);
+   drmHaikuMunmap(base != NULL ? base : map, map_size);
+   return VK_SUCCESS;
+#endif
 
    if (replace) {
       map = mmap(map, map_size, PROT_NONE,

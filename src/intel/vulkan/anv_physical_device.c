@@ -26,6 +26,29 @@
 #include <sys/sysmacros.h>
 #endif
 
+#ifdef __HAIKU__
+#include <stdlib.h>
+#include <string.h>
+
+/* Haiku's devfs nodes have no device numbers: they are made up as libdrm
+ * makes them (xf86drm.c), Linux's DRM major and the minor in the node's
+ * name, for VK_EXT_physical_device_drm (as RADV and NVK there). */
+static bool
+anv_haiku_node_numbers(const char *path, int64_t *major_out,
+                       int64_t *minor_out)
+{
+   struct stat st;
+   if (path == NULL || stat(path, &st) != 0)
+      return false;
+   const char *digits = path + strlen(path);
+   while (digits > path && digits[-1] >= '0' && digits[-1] <= '9')
+      digits--;
+   *major_out = 226;
+   *minor_out = atoi(digits) & 0xffff;
+   return true;
+}
+#endif
+
 #include "vk_android.h"
 
 /* This is probably far to big but it reflects the max size used for messages
@@ -334,7 +357,9 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_legacy_vertex_attributes          = true,
       .EXT_line_rasterization                = true,
       .EXT_load_store_op_none                = true,
+#ifndef __HAIKU__
       .EXT_map_memory_placed                 = device->info.has_mmap_offset,
+#endif
       /* Enable the extension only if we have support on both the local &
        * system memory
        */
@@ -910,10 +935,13 @@ get_features(const struct anv_physical_device *pdevice,
       .descriptorBufferImageLayoutIgnored = false,
       .descriptorBufferPushDescriptors = true,
 
-      /* VK_EXT_map_memory_placed */
+      /* VK_EXT_map_memory_placed (not on Haiku: i915_drm's mappings cannot
+       * replace a reservation in place, as amdgpu_drm's cannot for RADV) */
+#ifndef __HAIKU__
       .memoryMapPlaced = true,
       .memoryMapRangePlaced = false,
       .memoryUnmapReserve = true,
+#endif
 
       /* VK_KHR_shader_quad_control */
       .shaderQuadControl = true,
@@ -2311,6 +2339,7 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
 static VkResult
 anv_physical_device_init_uuids(struct anv_physical_device *device)
 {
+#ifdef HAVE_DL_ITERATE_PHDR
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(anv_physical_device_init_uuids);
    if (!note) {
@@ -2325,6 +2354,21 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    }
 
    memcpy(device->driver_build_sha1, build_id_data(note), 20);
+#else
+   /* No dl_iterate_phdr() to find the build-id (Haiku): the driver is told
+    * apart as the shader cache tells it apart, by its library file (RADV's
+    * way), with Mesa's version and commit, as NVK does there. */
+   struct mesa_sha1 id_ctx;
+   _mesa_sha1_init(&id_ctx);
+   if (!disk_cache_get_function_identifier(anv_physical_device_init_uuids,
+                                           &id_ctx)) {
+      return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
+                       "Failed to identify the driver's library");
+   }
+   static const char version[] = PACKAGE_VERSION MESA_GIT_SHA1;
+   _mesa_sha1_update(&id_ctx, version, sizeof(version));
+   _mesa_sha1_final(&id_ctx, device->driver_build_sha1);
+#endif
 
    struct mesa_sha1 sha1_ctx;
    uint8_t sha1[20];
@@ -2334,7 +2378,11 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
     * invalid.  It needs both a driver build and the PCI ID of the device.
     */
    _mesa_sha1_init(&sha1_ctx);
+#ifdef HAVE_DL_ITERATE_PHDR
    _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
+#else
+   _mesa_sha1_update(&sha1_ctx, device->driver_build_sha1, 20);
+#endif
    brw_device_sha1_update(&sha1_ctx, &device->info);
    bool always_use_bindless = !!(device->instance->debug & ANV_DEBUG_BINDLESS);
    _mesa_sha1_update(&sha1_ctx, &always_use_bindless,
@@ -2811,6 +2859,13 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    anv_shader_init_uuid(device);
 
    /* Gather major/minor before WSI. */
+#ifdef __HAIKU__
+   device->has_master = anv_haiku_node_numbers(primary_path,
+                                               &device->master_major,
+                                               &device->master_minor);
+   device->has_local = anv_haiku_node_numbers(path, &device->local_major,
+                                              &device->local_minor);
+#else
    struct stat st;
 
    if (stat(primary_path, &st) == 0) {
@@ -2832,6 +2887,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       device->local_major = 0;
       device->local_minor = 0;
    }
+#endif
 
    device->has_small_bar = anv_physical_device_has_vram(device) &&
                            device->vram_non_mappable.size != 0;

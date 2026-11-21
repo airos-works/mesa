@@ -22,6 +22,9 @@
  */
 
 #include <sys/mman.h>
+#ifdef __HAIKU__
+#include <xf86drm.h> /* drmHaikuMmap() */
+#endif
 
 #include "anv_private.h"
 
@@ -169,6 +172,25 @@ i915_gem_mmap_offset(struct anv_device *device, struct anv_bo *bo,
    };
    if (intel_ioctl(device->fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &gem_mmap))
       return MAP_FAILED;
+
+#ifdef __HAIKU__
+   /* i915_drm maps buffer objects with an ioctl of its own (libdrm's
+    * drm_haiku.h): Haiku cannot mmap() a device. Such a mapping is one area,
+    * which cannot be cut: the part before offset stays mapped and goes with
+    * the rest, whose start anv_device_unmap_bo() looks up. There are no
+    * placed mappings (VK_EXT_map_memory_placed is not offered there). */
+   if (placed_addr != NULL)
+      return MAP_FAILED;
+   void *base = drmHaikuMmap(NULL, offset + size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, device->fd, gem_mmap.offset);
+   if (base == MAP_FAILED)
+      return base;
+   if (offset != 0 && !anv_haiku_mapping_add(base + offset, base)) {
+      drmHaikuMunmap(base, offset + size);
+      return MAP_FAILED;
+   }
+   return base + offset;
+#endif
 
    if (placed_addr != NULL) {
       const uint64_t placed_num = (uintptr_t)placed_addr;

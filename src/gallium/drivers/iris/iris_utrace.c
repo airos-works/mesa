@@ -198,10 +198,17 @@ void iris_utrace_init(struct iris_context *ice)
    struct stat st;
    uint32_t minor;
 
+#ifdef __HAIKU__
+   /* (no device numbers on Haiku's devfs; the minor only names the GPU in
+    * Perfetto's traces) */
+   (void)st;
+   minor = 0;
+#else
    if (fstat(screen->fd, &st) == 0)
       minor = minor(st.st_rdev);
    else
       minor = 0;
+#endif
 
    intel_ds_device_init(&ice->ds, screen->devinfo, screen->fd, minor,
                         INTEL_DS_API_OPENGL);

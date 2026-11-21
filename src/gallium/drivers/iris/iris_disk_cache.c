@@ -34,6 +34,9 @@
 #include "compiler/nir/nir.h"
 #include "util/blob.h"
 #include "util/build_id.h"
+#ifndef HAVE_DL_ITERATE_PHDR
+#include "git_sha1.h"
+#endif
 #include "util/disk_cache.h"
 #include "util/mesa-sha1.h"
 #include "intel/compiler/brw/brw_compiler.h"
@@ -372,12 +375,26 @@ iris_disk_cache_init(struct iris_screen *screen)
       assert(len < ARRAY_SIZE(renderer) - 1);
    }
 
+#ifdef HAVE_DL_ITERATE_PHDR
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(iris_disk_cache_init);
    assert(note && build_id_length(note) == 20); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
+#else
+   /* No dl_iterate_phdr() to find the build-id (Haiku): the driver's library
+    * file tells the builds apart, as for RADV's and NVK's caches, with Mesa's
+    * version and commit. */
+   uint8_t id_sha1[20];
+   struct mesa_sha1 id_ctx;
+   _mesa_sha1_init(&id_ctx);
+   if (!disk_cache_get_function_identifier(iris_disk_cache_init, &id_ctx))
+      return;
+   static const char version[] = PACKAGE_VERSION MESA_GIT_SHA1;
+   _mesa_sha1_update(&id_ctx, version, sizeof(version));
+   _mesa_sha1_final(&id_ctx, id_sha1);
+#endif
 
    char timestamp[41];
    _mesa_sha1_format(timestamp, id_sha1);

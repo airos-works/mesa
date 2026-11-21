@@ -94,6 +94,12 @@ get_sysfs_dev_dir(struct intel_perf_config *perf, int fd)
    if (INTEL_DEBUG(DEBUG_NO_OACONFIG))
       return true;
 
+#ifdef __HAIKU__
+   /* No sysfs on Haiku (nor device numbers): no OA metric sets from there */
+   (void)sb; (void)min; (void)maj; (void)drmdir; (void)drm_entry; (void)len;
+   DBG("No sysfs to find the OA metric sets in (Haiku)\n");
+   return false;
+#else
    if (fstat(fd, &sb)) {
       DBG("Failed to stat DRM fd\n");
       return false;
@@ -143,6 +149,7 @@ get_sysfs_dev_dir(struct intel_perf_config *perf, int fd)
        maj, min);
 
    return false;
+#endif
 }
 
 static bool

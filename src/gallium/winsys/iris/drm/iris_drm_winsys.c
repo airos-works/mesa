@@ -34,3 +34,27 @@ iris_drm_screen_create(int fd, const struct pipe_screen_config *config)
 {
    return iris_screen_create(fd, config);
 }
+
+#ifdef __HAIKU__
+#include "pipe/p_screen.h"
+#include "util/driconf.h"
+#include "util/macros.h"
+
+struct pipe_screen *
+iris_haiku_screen_create(int fd)
+{
+   static const driOptionDescription descriptions[] = {
+#include "iris/driinfo_iris.h"
+   };
+   driOptionCache info = {0}, options = {0};
+   driParseOptionInfo(&info, descriptions, ARRAY_SIZE(descriptions));
+   struct pipe_screen_config config = {
+      .options = &options,
+      .options_info = &info,
+   };
+   struct pipe_screen *screen = iris_screen_create(fd, &config);
+   driDestroyOptionCache(&options);
+   driDestroyOptionInfo(&info);
+   return screen;
+}
+#endif

@@ -167,6 +167,10 @@ elif with_platform_haiku
     # NVIDIA GPUs on nouveau_drm
     deps_for_egl += [driver_nouveau]
   endif
+  if with_gallium_iris
+    # Intel GPUs on i915_drm
+    deps_for_egl += [driver_iris, dep_libdrm]
+  endif
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='

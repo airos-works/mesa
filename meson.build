@@ -1699,9 +1699,9 @@ if system_has_kms_drm
     required : with_dri2 or with_dri or with_gbm,
     allow_fallback: allow_fallback_for_libdrm,
   )
-elif with_platform_haiku and ((with_amd_vk and not with_platform_windows) or with_gallium_radeonsi or with_any_nouveau)
-  # Haiku has no KMS, but the amdgpu_drm and nouveau_drm add-ons are Linux's
-  # DRM drivers for rendering and libdrm is ported to them.
+elif with_platform_haiku and ((with_amd_vk and not with_platform_windows) or with_gallium_radeonsi or with_any_nouveau or with_any_intel)
+  # Haiku has no KMS, but the amdgpu_drm, nouveau_drm and i915_drm add-ons
+  # are Linux's DRM drivers for rendering and libdrm is ported to them.
   dep_libdrm = dependency('libdrm', version : '>=' + _drm_ver,
                           allow_fallback: allow_fallback_for_libdrm)
 else

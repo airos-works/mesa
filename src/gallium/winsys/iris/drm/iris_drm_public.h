@@ -30,4 +30,11 @@ struct pipe_screen_config;
 struct pipe_screen *
 iris_drm_screen_create(int drm_fd, const struct pipe_screen_config *config);
 
+#ifdef __HAIKU__
+/* A screen on an i915_drm render node, without a pipe loader (EGL Haiku):
+ * the driver options are iris's defaults (and the environment's). */
+struct pipe_screen *
+iris_haiku_screen_create(int drm_fd);
+#endif
+
 #endif /* IRIS_DRM_PUBLIC_H */

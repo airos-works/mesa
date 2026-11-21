@@ -73,6 +73,15 @@
 
 #include <xf86drm.h>
 
+#ifdef __HAIKU__
+/* Haiku cannot mmap() a device: i915_drm maps buffer objects with an ioctl
+ * of its own (libdrm's drm_haiku.h), whose mappings drmHaikuMunmap() undoes
+ * (i915/iris_kmd_backend.c maps them). */
+#define iris_munmap(addr, size) drmHaikuMunmap(addr, size)
+#else
+#define iris_munmap(addr, size) os_munmap(addr, size)
+#endif
+
 #ifdef HAVE_VALGRIND
 #include <valgrind.h>
 #include <memcheck.h>
@@ -661,7 +670,7 @@ bo_unmap(struct iris_bo *bo)
    assert(iris_bo_is_real(bo));
 
    VG_NOACCESS(bo->real.map, bo->size);
-   os_munmap(bo->real.map, bo->size);
+   iris_munmap(bo->real.map, bo->size);
    bo->real.map = NULL;
 }
 
@@ -1794,7 +1803,7 @@ iris_bo_map(struct util_debug_callback *dbg,
 
          if (p_atomic_cmpxchg(&bo->real.map, NULL, map)) {
             VG_NOACCESS(map, bo->size);
-            os_munmap(map, bo->size);
+            iris_munmap(map, bo->size);
          }
       }
       assert(bo->real.map);

@@ -23,6 +23,9 @@
 #include "iris/iris_kmd_backend.h"
 
 #include <sys/mman.h>
+#ifdef __HAIKU__
+#include <xf86drm.h> /* drmHaikuMmap() */
+#endif
 
 #include "common/intel_debug_identifier.h"
 #include "common/intel_gem.h"
@@ -215,9 +218,15 @@ i915_gem_mmap_offset(struct iris_bufmgr *bufmgr, struct iris_bo *bo)
       return NULL;
    }
 
-   /* And map it */
+   /* And map it (on Haiku with i915_drm's own ioctl, libdrm's drm_haiku.h:
+    * a device cannot be mmap()ed there) */
+#ifdef __HAIKU__
+   void *map = drmHaikuMmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                            iris_bufmgr_get_fd(bufmgr), mmap_arg.offset);
+#else
    void *map = mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                     iris_bufmgr_get_fd(bufmgr), mmap_arg.offset);
+#endif
    if (map == MAP_FAILED) {
       DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
           __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));

@@ -56,7 +56,7 @@
 #ifdef GALLIUM_PANFROST
 #include "panfrost/pan_public.h"
 #endif
-#if defined(GALLIUM_RADEONSI) || defined(GALLIUM_NOUVEAU)
+#if defined(GALLIUM_RADEONSI) || defined(GALLIUM_NOUVEAU) || defined(GALLIUM_IRIS)
 /* Gallium drivers on a Linux DRM driver ported as a Haiku add-on */
 #define HAIKU_DRM_SCREENS 1
 #include <fcntl.h>
@@ -70,6 +70,11 @@ extern "C" {
 #ifdef GALLIUM_NOUVEAU
 extern "C" {
 #include "nouveau/drm/nouveau_drm_public.h"
+}
+#endif
+#ifdef GALLIUM_IRIS
+extern "C" {
+#include "iris/drm/iris_drm_public.h"
 }
 #endif
 #ifdef GALLIUM_ZINK
@@ -301,7 +306,8 @@ haiku_present_texture(struct pipe_context *pipe, struct hgl_buffer *buffer,
 #ifdef HAIKU_DRM_SCREENS
 /* GPUs whose Linux DRM driver is ported as a Haiku add-on: AMD ones render
  * through amdgpu_drm with radeonsi, NVIDIA ones through nouveau_drm with
- * nouveau (nv50 for Tesla, nvc0 for Fermi and Kepler). On the render node
+ * nouveau (nv50 for Tesla, nvc0 for Fermi and Kepler), Intel ones (Gen 9
+ * and later) through i915_drm with iris. On the render node
  * MESA_HAIKU_DRM_DEVICE names, or else on the first one of a GPU there is a
  * driver for; the kernel driver's name picks the Gallium driver. Frames are
  * presented by copying them into the window's bitmap, radeonsi's also
@@ -316,6 +322,10 @@ haiku_drm_vendor_supported(uint16_t vendor)
 #endif
 #ifdef GALLIUM_NOUVEAU
    if (vendor == 0x10de)
+      return true;
+#endif
+#ifdef GALLIUM_IRIS
+   if (vendor == 0x8086)
       return true;
 #endif
    return false;
@@ -359,6 +369,10 @@ haiku_drm_screen_create(bool *drm_present)
 #ifdef GALLIUM_NOUVEAU
       if (strcmp(version->name, "nouveau") == 0)
          screen = nouveau_drm_screen_create(fd);
+#endif
+#ifdef GALLIUM_IRIS
+      if (strcmp(version->name, "i915") == 0)
+         screen = iris_haiku_screen_create(fd);
 #endif
       if (screen == NULL && getenv("HGL_TRACE") != NULL) {
          fprintf(stderr, "egl_haiku: no Gallium screen on %s (DRM driver "

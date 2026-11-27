@@ -1710,13 +1710,25 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    };
    int ret;
 
-   /* Make sure all jobs are done before destroying the heap. */
-   ret = pan_sync_wait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
-                        NULL);
-   assert(!ret);
+   /* Make sure all jobs are done before destroying the heap.
+    *
+    * None of this may fail the process: the context is torn down because it
+    * was lost as often as not, and then its last job ended in an error. On
+    * Haiku the wait reports that error (drmSyncobjWait() does not), and the
+    * kernel may already have retired the group. The asserts that were here
+    * turned a context loss the application recovers from into an abort()
+    * (airos-works/haiku#209); upstream builds them out in release builds.
+    */
+   do {
+      ret = pan_sync_wait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX,
+                          0, NULL);
+   } while (ret && errno == EINTR);
+   if (ret)
+      mesa_logw("context teardown: last job ended in error (err=%d)", errno);
 
    ret = pan_csf_heap_destroy(dev->kmod.dev, &thd);
-   assert(!ret);
+   if (ret)
+      mesa_logw("context teardown: tiler heap destroy failed (err=%d)", errno);
 
    struct drm_panthor_group_destroy gd = {
       .group_handle = ctx->csf.group_handle,
@@ -1724,7 +1736,8 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
 
    ret =
       pan_csf_group_destroy(dev->kmod.dev, &gd);
-   assert(!ret);
+   if (ret)
+      mesa_logw("context teardown: group destroy failed (err=%d)", errno);
 
    panfrost_bo_unreference(ctx->csf.tmp_geom_bo);
    panfrost_bo_unreference(ctx->csf.heap.desc_bo);

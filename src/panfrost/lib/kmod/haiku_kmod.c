@@ -538,7 +538,10 @@ int haiku_kmod_group_destroy(struct pan_kmod_dev *base, struct drm_panthor_group
    simple_mtx_lock(&dev->lock);
    struct haiku_object *slot = find_object(dev->groups, HAIKU_MAX_GROUPS, req->group_handle);
    int ret = slot ? pan_haiku_queue_destroy(base->fd, slot->handle) : fail(EINVAL);
-   if (!ret) memset(slot, 0, sizeof(*slot));
+   /* EIO: the queue is gone, the GPU needs a recovery; ENOENT: the recovery
+    * already retired it. Either way the slot is free again: keeping it made
+    * every context lost and rebuilt leak one (airos-works/haiku#209). */
+   if (slot && (!ret || errno == EIO || errno == ENOENT)) memset(slot, 0, sizeof(*slot));
    simple_mtx_unlock(&dev->lock);
    return ret;
 }
@@ -617,7 +620,7 @@ int haiku_kmod_heap_destroy(struct pan_kmod_dev *base, struct drm_panthor_tiler_
    simple_mtx_lock(&dev->lock);
    struct haiku_object *slot = find_object(dev->heaps, HAIKU_MAX_HEAPS, req->handle);
    int ret = slot ? pan_haiku_heap_destroy(base->fd, slot->vm, slot->handle) : fail(EINVAL);
-   if (!ret) memset(slot, 0, sizeof(*slot));
+   if (slot && (!ret || errno == ENOENT)) memset(slot, 0, sizeof(*slot));
    simple_mtx_unlock(&dev->lock);
    return ret;
 }
